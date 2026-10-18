@@ -17,19 +17,30 @@
 3) 技能 scripts/config.local.json
 4) 用户级 ~/.workbuddy/tplink-toolkit.config.json   ← 推荐用这个
 
-配置字段（全部可选）
-------------------
-  kongbiao_json       控标参数库 JSON           （只读源，未配置时用到才报错）
-  fw_spec_json        防火墙/行为管理 官方规格 JSON（只读源）
-  dealer_backup_json  选型（合作伙伴平台）备份 JSON
-  price_backup_json   CRM 价格本地备份 JSON
-  license_map_json    多合一 License 映射 JSON
-  weekly_report_root  周报根目录
-  crm_base            内部 CRM 站点根地址（如 https://内网域名）
-  dealer_base         合作伙伴平台根地址
-  pricing_default     未说明定价策略时的默认策略（自然语言，留空=每次必问）
+配置字段（全部可选，留空的项按「留空行为」处理）
+------------------------------------------------
+  kongbiao_json       控标参数库 JSON              留空→提示未配置，参数改走官网
+  fw_spec_json        防火墙/行为管理官方规格 JSON  留空→核算退回控标库
+  dealer_backup_json  选型（合作伙伴平台）备份 JSON 留空→选型没有候选可挑（最关键）
+  price_backup_json   CRM 价格本地备份 JSON        留空→落到默认 data 目录
+  license_map_json    多合一 License 映射 JSON     留空→落到默认 data 目录
+  weekly_report_root  周报根目录                   留空→周报技能提示未配置
+  crm_base            内部 CRM 站点根地址          留空→取价跳过，参数不受影响
+  dealer_base         合作伙伴平台根地址           留空→仅平台类操作受影响
+  pricing_default     未说明定价策略时的默认策略    留空→每次报价仍会问
   crm:    {email, password}   也可用环境变量 TP_CRM_EMAIL / TP_CRM_PASSWORD
-  dealer: {phone, password}   合作伙伴平台登录
+  dealer: {phone, password}   也可用环境变量 TP_DEALER_PHONE / TP_DEALER_PASSWORD
+
+每个字段的详细含义、数据文件从哪来、留空的具体表现，
+见仓库根 config.example.json（每字段上方有一条 `_字段名` 注释，JSON 不支持注释故用此约定）。
+
+给 AI 的配置指引
+----------------
+要让 AI 帮忙配置，把上面的「配置字段」和 config.example.json 交给它即可；
+更完整的五步流程（看现状→分支→写文件→验证→讲边界）写在
+skills/tplink-quote-autofill/SKILL.md 的「🤖 帮用户配好配置」一节。
+三条铁律：路径用正斜杠；已存在的配置先读再改（别整份覆盖，会冲掉账号）；
+拿不到的值留空，绝不填假路径（留空报"未配置"，假路径报"文件不存在"，后者更难查）。
 
 内部系统地址为什么不写死在代码里
 --------------------------------

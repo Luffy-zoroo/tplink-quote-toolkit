@@ -20,9 +20,18 @@
 
 ## 二、怎么用它（给同事看的）
 
-### 装法
+### 装法（两种，任选一种）
 
-把整个 `tplink-quote-autofill` 文件夹，放进你电脑的：
+**推荐：在仓库根目录跑一键脚本**（会把 5 个技能一起装好并生成初始配置）
+
+```bash
+git clone https://github.com/Luffy-zoroo/tplink-quote-toolkit.git
+cd tplink-quote-toolkit
+pip install openpyxl
+python install.py
+```
+
+**或者手动**：把整个 `tplink-quote-autofill` 文件夹，放进你电脑的：
 
 ```
 C:\Users\<你的用户名>\.workbuddy\skills\
@@ -35,8 +44,11 @@ C:\Users\<你的用户名>\.workbuddy\skills\
     ├── SKILL.md              ← 技能说明书（WorkBuddy 自动读）
     ├── README.md             ← 就是本文件
     ├── scripts\
-    │     ├── autofill_quote.py     ← 主程序
-    │     └── sanitize_params.py    ← 品牌词清洗工具
+    │     ├── autofill_quote.py    ← 主程序
+    │     ├── sanitize_params.py   ← 品牌词清洗工具
+    │     ├── nat_classify.py      ← 全清单设备枚举 + NAT 分类
+    │     ├── capacity_check.py    ← 带机量核算
+    │     └── tpkit_config.py      ← 配置读取（路径都由它决定）
     └── references\
           ├── kongbiao_library.md   ← 控标库字段结构说明
           └── crm_access.md         ← CRM 登录与取价接口（稳定技术事实）
@@ -46,20 +58,36 @@ C:\Users\<你的用户名>\.workbuddy\skills\
 
 > "把这个清单的控标参数和价格填一下"（然后把 Excel 拖进来）
 
-### 用之前要准备的两样东西
+### 装完技能，还要装「数据包」（重要）
 
-**1）本地控标库 JSON**（可选，但强烈建议有）
+技能本身**不含数据**。控标库 / 选型库 / 价格备份 / License 映射 / 防火墙规格这五个 JSON
+是内部数据，单独打成一个 **`TP-LINK清单工作流-数据包-<日期>.zip`** 放在**内部共享盘**（公开仓库里故意没有）。
 
-路径固定为：
-
+```bash
+# ① 把数据包解压到任意位置（不用放进技能目录），比如 D:\TP-LINK工作流数据\
+# ② 在该目录下跑一次，自动把配置里的数据路径指向本包（旧配置自动备份）
+cd D:\TP-LINK工作流数据
+python 生成配置.py            # 加 --dry-run 可先看会改什么
 ```
-<控标数据目录>\tplink_kongbiao_data.json
-```
 
-没有这个文件也能跑，只是所有参数都得走官网抓，慢一些、覆盖少一些。
-如果你的路径不一样，用 `--kb` 参数指定，比如 `--kb "E:\我的资料\kongbiao.json"`。
+换电脑 / 挪了目录 → **重跑一次 `生成配置.py`** 就行，不用手改路径。
+包内 `00-先读我.md` 有更完整的三步安装和 FAQ。
 
-**2）TP-LINK 销售 CRM 账号**（要算折扣价就必须要）
+包内文件名换了，但**程序看的是配置里的路径、不看名字**，只要对得上就没问题：
+
+| 包内文件 | 程序原名 | 少了会怎样 |
+|---|---|---|
+| `数据/1-控标参数库.json` | `tplink_kongbiao_data.json` | 参数全走官网抓，**拿不到 ★ 加分项** |
+| `数据/2-选型库.json` | `tplink_dealer_backup.json` | **选型做不了**（候选型号全靠它反查） |
+| `数据/3-价格备份.json` | `tplink_crm_price_backup.json` | 只能联网查价，CRM 不通就没价 |
+| `数据/4-License映射.json` | `tplink_license_map.json` | 防火墙多合一库的 SKU 取不到 |
+| `数据/5-防火墙规格.json` | `tplink_fw_spec_20251120.json` | 防火墙带机量/吞吐无本地兜底 |
+
+> ⚠️ 数据包别外传、别上传到任何公开位置。
+
+### 还要准备的账号
+
+**TP-LINK 销售 CRM 账号**（要算折扣价就必须要）
 
 需要能登录 `$CRM_BASE/crm` 的账号密码（内网域名，得在公司网络或本机代理下）。
 脚本会自动从你的 WorkBuddy 记忆文件里读账号密码；读不到就问你要，或者用 `--email` / `--password` 传。
@@ -261,7 +289,8 @@ A：控标库里的参数本身是分条的，填进去是多行文本；如果�
 A：会被标记「没查到」，不会乱填。需要你手工处理。
 
 **Q：控标库在哪更新？**
-A：`<控标数据目录>\tplink_kongbiao_data.json`，是 JSON 数组，按 `{category, product_name, model, params_raw, param_items}` 结构往里加即可。
+A：就是数据包里的 `数据/1-控标参数库.json`。拿到新版本直接**覆盖同名文件**即可，配置不用动。
+它是 JSON 数组，按 `{category, product_name, model, params_raw, param_items}` 结构往里加也行。
 
 **Q：型号列里写成「TL-VS7500+TL-NVDU7606S*4」这种，价格只算一个还是全算？**
 A：**全算**。参数填 TL-VS7500 的，价格 = 解码矩阵 + 板卡×4 的总价。详见第三节「组合型号怎么算」。

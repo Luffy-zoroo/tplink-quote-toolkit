@@ -40,7 +40,7 @@ agent_created: true
 
 | 项 | 值 |
 |---|---|
-| 备份文件（固定） | `<控标数据目录>\tplink_crm_price_backup.json` |
+| 备份文件 | 由配置项 `crm_price_backup_json` 决定；数据包里是 `数据/3-价格备份.json`（程序内原名 `tplink_crm_price_backup.json`） |
 | 工具 | 本技能 `scripts/price_cache.py`（复用同目录 `crm_query.py` 登录/查询） |
 
 ```bash

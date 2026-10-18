@@ -1,30 +1,50 @@
 {
-  "_help_1": "把本文件复制到 ~/.workbuddy/tplink-toolkit.config.json（Windows 即 C:\\Users\\<你的用户名>\\.workbuddy\\tplink-toolkit.config.json），然后按自己的情况填写。",
-  "_help_2": "路径写正斜杠最省事：D:/data/x.json。留空的项使用默认行为：只读源留空会提示未配置；可写备份留空会落到 ~/.workbuddy/tplink-toolkit/data/ 下。",
-  "_help_3": "crm_base / dealer_base 是组织内部系统地址（本仓库不内置，需按你所在组织填写）；不填则相关取价功能会跳过，参数部分仍可正常使用。",
-  "_help_4": "crm / dealer 是登录内部系统的账号，只有本单位员工才有。",
-  "_help_5": "pricing_default：你没说明定价策略时，默认执行的策略（自然语言）。例：'监控和网络走片区折扣，其余走总部折扣'。留空=每次仍必问。",
+  "_1_这是干什么的": "本文件是配置模板。复制到 ~/.workbuddy/tplink-toolkit.config.json（Windows: C:\\Users\\<你的用户名>\\.workbuddy\\tplink-toolkit.config.json）后按需填写。所有字段都可以不填，不填的项按各自注释里的『默认行为』处理。",
+  "_2_读取顺序": "程序按此顺序找配置文件，只取第一个存在的、不做合并：1) 环境变量 TPKIT_CONFIG 指向的文件 2) 技能根目录/config.local.json 3) 技能 scripts/config.local.json 4) ~/.workbuddy/tplink-toolkit.config.json（推荐）。注意：install.py 升级时会删掉技能目录重建，所以配置不要放 2、3 两处。",
+  "_3_怎么自检": "填完运行：python ~/.workbuddy/skills/tplink-quote-autofill/scripts/tpkit_config.py —— 会打印实际生效的配置文件、以及每个字段当前取到的值。",
+  "_4_路径写法": "Windows 路径请写正斜杠：D:/数据/tplink_kongbiao_data.json（反斜杠在 JSON 里必须写成 \\\\，容易出错）。支持 ~ 和 %ENV% 变量。",
+  "_5_数据文件从哪来": "内部同事找同事要「TP-LINK清单工作流-数据包」压缩包，解压后跑包里的 生成配置.py 会自动把这 5 个路径填好，不用手抄。包内文件名是 数据/1-控标参数库.json ~ 数据/5-防火墙规格.json，与下面的原名一一对应（程序看路径、不看文件名）。",
+  "_6_数据文件缺了会怎样": "五个文件都可以缺，缺了只是能力减弱：缺 kongbiao_json → 参数全走官网、拿不到★加分项；缺 dealer_backup_json → 选型阶段没有候选可挑（最影响使用）；缺 price_backup_json → 只能实时连 CRM 取价；缺 license_map_json → 防火墙授权 SKU 只能逐个联网查；缺 fw_spec_json → 防火墙规格退回控标库。",
 
+  "_kongbiao_json": "控标参数库（只读）。内部整理的 JSON 数组，每项 {category, product_name, model, params_raw, param_items:[{text,is_bonus}]}。留空 → 用到时提示未配置，参数改走官网抓取。",
   "kongbiao_json": "",
+
+  "_fw_spec_json": "防火墙/行为管理官方规格表（只读），用于带机量核算和参数兜底。通常是 tplink_fw_spec_<日期>.json。留空 → 相关核算退回用控标库数据。",
   "fw_spec_json": "",
+
+  "_dealer_backup_json": "选型库（合作伙伴平台的产品镜像，约 2800 条，含 industry/cat1/cat2/spec 字段）。选型阶段靠它按参数反查候选型号，是这套工作流里最关键的只读数据。留空 → 选型做不了，只能用清单给的型号直接查参数。",
   "dealer_backup_json": "",
+
+  "_price_backup_json": "CRM 价格本地备份（可写）。查过一次价就自动落盘的离线缓存，CRM 连不上时用它兜底。留空 → 自动写到 ~/.workbuddy/tplink-toolkit/data/tplink_crm_price_backup.json。",
   "price_backup_json": "",
+
+  "_license_map_json": "防火墙多合一 License 的 SKU 映射（可写），形如 TL-FW-LIS-ALL 200 元/年、TL-FW-LIS-ALL-E 800 元/年。留空 → 自动写到 ~/.workbuddy/tplink-toolkit/data/ 下。",
   "license_map_json": "",
+
+  "_weekly_report_root": "配单周报的根目录（周报技能用）。里面放「项目背景.md」和每天的清单。留空 → 周报技能提示未配置。",
   "weekly_report_root": "",
 
+  "_crm_base": "组织内部 CRM 站点根地址，末尾不带斜杠。本仓库不内置任何真实域名，必须按你所在组织填写。取价接口是 <crm_base>/api/line/findByPage。留空 → 取价类功能提示未配置并跳过，参数功能不受影响。",
   "crm_base": "",
+
+  "_dealer_base": "合作伙伴平台根地址，末尾不带斜杠。同样不内置真实域名。留空 → 只有需要登录平台刷新选型库/授权映射时受影响。",
   "dealer_base": "",
 
+  "_crm": "内部 CRM 登录账号。也可以用环境变量 TP_CRM_EMAIL / TP_CRM_PASSWORD 代替。没有账号 → 只能出参数、出不了折扣价。",
   "crm": {
     "email": "",
     "password": ""
   },
+
+  "_dealer": "合作伙伴平台登录账号（手机号 + 密码）。也可以用环境变量 TP_DEALER_PHONE / TP_DEALER_PASSWORD 代替。",
   "dealer": {
     "phone": "",
     "password": ""
   },
 
+  "_pricing_default": "默认定价策略（自然语言）。用户当次没说怎么定价时执行它。例：'监控类走片区折扣，其余走总部折扣'。留空 → 每次报价都会问一遍定价策略，不预设。",
   "pricing_default": "",
 
+  "_proxy": "需要走代理访问内部系统时填写，如 http://127.0.0.1:7890。留空 → 直连。",
   "proxy": ""
 }

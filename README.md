@@ -9,7 +9,9 @@
 
 本仓库**只有工具代码和工作流文档**，不包含任何产品数据、价格数据、客户信息或账号凭据。
 
-数据（控标库、选型库、价格备份）需要你自己准备 —— 见 [数据文件从哪来](#数据文件从哪来)。
+数据（控标库、选型库、价格备份、License 映射、防火墙规格）**需要单独准备**：
+内部同事找同事要**数据包 zip**（跑包里的 `生成配置.py` 就配好），
+外部则按需自己攒 —— 见 [数据文件从哪来](#数据文件从哪来)。
 `.gitignore` 已经把数据文件和本地配置全部兜底排除，**请永远不要把数据文件提交进来**。
 
 ---
@@ -29,7 +31,7 @@
 
 ---
 
-## 三分钟上手
+## 五分钟上手
 
 **0）前置**：Python 3.8+，装一个库
 
@@ -49,12 +51,27 @@ python install.py               # 会先打印要做什么；加 --dry-run 可�
 它会把 `skills/*` 装到 `~/.workbuddy/skills/`，把 `dealer-tool` 装到
 `~/.workbuddy/tplink-toolkit/dealer-tool/`，并生成一份初始配置。
 
-**2）填配置**（唯一必须手动做的一步）
+**2）装数据包**（同事照做就行，数据在内部共享盘）
 
-编辑 `~/.workbuddy/tplink-toolkit.config.json`，把路径改成你电脑上的真实路径。
-格式照 `config.example.json` 的注释填。
+数据文件不在本仓库。找同事要 **`TP-LINK清单工作流-数据包-<日期>.zip`**，解压到任意位置
+（**不用放进技能目录**），然后在该目录下跑一次：
 
-**3）重启 WorkBuddy**，然后在对话里直接说：
+```bash
+cd D:\TP-LINK工作流数据          # 换成你解压的位置
+python 生成配置.py               # 自动把配置里的数据路径指向本包；加 --dry-run 可先看会改什么
+```
+
+换电脑 / 挪了文件夹 → 重跑一次 `生成配置.py`，不用手改路径。
+包里有 `00-先读我.md`，写了三步安装、文件对照表和 FAQ。
+
+> 没有数据包也不影响跑起来，只是能力会减弱——见 [数据文件从哪来](#数据文件从哪来)。
+
+**3）填配置**（内部域名和账号是唯一必须手填的部分）
+
+编辑 `~/.workbuddy/tplink-toolkit.config.json`，填 `crm_base` / `dealer_base` 和账号。
+格式照 `config.example.json` 的注释填。**不填也能用**：参数功能正常，取价会跳过并提示。
+
+**4）重启 WorkBuddy**，然后在对话里直接说：
 
 > 把这个清单的控标参数和价格补一下（把 Excel 拖进来）
 
@@ -62,14 +79,33 @@ python install.py               # 会先打印要做什么；加 --dry-run 可�
 
 ## 数据文件从哪来
 
-三个数据文件，按需准备 —— **一个都没有也能用**，只是能力会减弱：
+**内部同事：直接拿数据包，不用自己攒。**
+
+找同事要 `TP-LINK清单工作流-数据包-<日期>.zip`，解压后跑包里的 `生成配置.py` 就全配好了
+（见[上手第 2 步](#五分钟上手)）。包内文件名加了序号只是方便认，**程序看的是配置里的路径**：
+
+| 包内文件 | 程序原名 |
+|---|---|
+| `数据/1-控标参数库.json` | `tplink_kongbiao_data.json` |
+| `数据/2-选型库.json` | `tplink_dealer_backup.json` |
+| `数据/3-价格备份.json` | `tplink_crm_price_backup.json` |
+| `数据/4-License映射.json` | `tplink_license_map.json` |
+| `数据/5-防火墙规格.json` | `tplink_fw_spec_20251120.json` |
+
+> ⚠️ 数据包是内部数据：**别外传、别上传到任何公开位置**。
+
+**没有数据包时**：下面这五个按需自己准备 —— **一个都没有也能用**，只是能力会减弱：
 
 | 文件 | 作用 | 没有会怎样 | 怎么获得 |
 |---|---|---|---|
-| `tplink_kongbiao_data.json` | 控标参数库 | 参数全走官网抓，慢且覆盖少 | 内部整理维护，按 `{category, product_name, model, params_raw, param_items}` 结构往里加 |
-| `tplink_dealer_backup.json` | 选型库 | `pick.py` 检索不到候选 | `python dealer-tool/backup.py --all`（需合作伙伴平台账号） |
-| `tplink_crm_price_backup.json` | 价格本地备份 | 无网时查不到历史价格 | 用 `price_cache.py` 查过就会自动落盘，慢慢攒 |
+| `tplink_kongbiao_data.json` | 控标参数库 | 参数全走官网抓，慢、覆盖少、**没有 ★ 加分项** | 内部整理维护，按 `{category, product_name, model, params_raw, param_items}` 结构往里加 |
+| `tplink_dealer_backup.json` | 选型库 | **选型阶段找不到候选型号**（`pick.py` 检索不到） | `python dealer-tool/backup.py --all`（需合作伙伴平台账号） |
+| `tplink_crm_price_backup.json` | 价格本地备份 | 无网时查不到历史价格，只能实时连 CRM | 用 `price_cache.py` 查过就会自动落盘，慢慢攒 |
 | `tplink_fw_spec_*.json` | 防火墙官方规格 | 带机量核算退回控标库 | 从官网整理 |
+| `tplink_license_map.json` | 多合一 License 映射 | 防火墙授权 SKU 只能逐个联网查 | `python dealer-tool/license.py --all` |
+
+> ⚠️ 现在工作流是**选型前置**，所以 **`tplink_dealer_backup.json` 是最关键的一个**——
+> 没有它，第一步「选型」就没有候选可挑，只能凭型号直接查参数。
 
 > 💡 **最省事的起手式**：先只配 `kongbiao_json`（或干脆先不配），
 > 把清单丢进去跑一遍看效果；价格那部分等你有了 CRM 账号再开。
@@ -78,12 +114,17 @@ python install.py               # 会先打印要做什么；加 --dry-run 可�
 
 ## 配置说明
 
-配置文件读取顺序（先命中先用，只取第一个存在的）：
+配置文件读取顺序（先命中先用，**只读第一个存在的文件**，后面的不再合并）：
 
 1. 环境变量 `TPKIT_CONFIG` 指向的 JSON
-2. 技能目录下的 `config.local.json`
-3. **`~/.workbuddy/tplink-toolkit.config.json`** ← 推荐用这个
-4. 内置默认（留空）
+2. 技能根目录的 `config.local.json`（如 `~/.workbuddy/skills/tplink-quote-autofill/config.local.json`）
+3. 技能 `scripts/` 下的 `config.local.json`
+4. **`~/.workbuddy/tplink-toolkit.config.json`** ← **推荐用这个**
+
+> ⚠️ **别用第 2、3 种**：`install.py` 升级时会 `rmtree` 整个技能目录再重建，
+> 放在里面的 `config.local.json` 会被一起删掉。用户级那个（第 4 种）不在技能目录里，升级不受影响。
+
+看看当前实际生效的是哪份、字段有没有配错：见本节末尾「自查当前生效配置」。
 
 | 字段 | 说明 |
 |---|---|
@@ -126,12 +167,47 @@ python skills/tplink-quote-autofill/scripts/tpkit_config.py
 
 ---
 
+## 保持更新
+
+**代码/技能**和**数据文件**分开更新，互不影响。
+
+### 代码 / 技能更新
+
+```bash
+git pull                  # 拉最新代码
+python install.py         # 重新装进 ~/.workbuddy/skills/
+# 重启 WorkBuddy —— 技能是启动时加载的，不重启读不到新版
+```
+
+`install.py` 会**先把技能目录整个删掉再复制**，所以：
+
+| 放在哪 | 升级后 |
+|---|---|
+| 配置：`~/.workbuddy/tplink-toolkit.config.json` | ✅ 不受影响 |
+| 配置：技能目录里的 `config.local.json` | ❌ **丢失** |
+| 数据文件（数据包） | ✅ 不受影响（本来就在技能目录外） |
+
+### 数据文件更新
+
+拿到新版 JSON，**直接覆盖配置里指的那个文件**就行——不用改配置、不用重装技能、不用重启
+（脚本每次运行都重新读文件，没有任何缓存）。
+
+```bash
+# 例：控标库换新版，覆盖掉旧文件即可
+copy 新版控标库.json D:\...\tplink_kongbiao_data.json
+```
+
+> 数据包里的 `数据/1-控标参数库.json` ~ `5-防火墙规格.json` 同理，覆盖同名文件即可。
+> **只有数据包整个挪了位置**，才需要重跑一次 `python 生成配置.py`。
+
+---
+
 ## 目录结构
 
 ```
 tplink-quote-toolkit/
 ├── README.md
-├── config.example.json          ← 配置模板
+├── config.example.json          ← 配置模板（每个字段的含义/留空行为都写在里面，可交给 AI 照着配）
 ├── install.py                   ← 一键安装
 ├── skills/                      ← WorkBuddy 技能（装到 ~/.workbuddy/skills/）
 │   ├── tplink-quote-autofill/   ← 核心：填参数 + 算价

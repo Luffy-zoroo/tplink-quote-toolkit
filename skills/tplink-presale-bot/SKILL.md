@@ -61,7 +61,7 @@ tools.py ──── 工具层：取数与计算（★所有能力的唯一实�
 ## 关键事实
 
 ### 数据源
-- 控标库：`<控标数据目录>\tplink_kongbiao_data.json`
+- 控标库：数据包里的 `数据/1-控标参数库.json`（程序内原名 `tplink_kongbiao_data.json`，路径由配置决定）
   - 结构：`list`，每项 `{category, product_name, model, params_raw, param_items:[{text,is_bonus}]}`
   - 原始 658 条 → **有效型号仅 551 个**（107 条 model 是脏数据）
   - **161 个型号含 `is_bonus=True` 的 ★加分项**（早期误判为"全是 false"，务必按型号实测）

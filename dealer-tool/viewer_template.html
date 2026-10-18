@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TP-LINK 选型备份（离线）</title>
+<style>
+  :root{--bg:#f6f7f9;--card:#fff;--line:#e3e6ea;--tx:#1f2329;--tx2:#646a73;--blue:#1f6fb5;--org:#b45309;--red:#c0392b;}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--tx);font:14px/1.6 "Microsoft YaHei","PingFang SC",system-ui,sans-serif}
+  header{position:sticky;top:0;z-index:9;background:#fff;border-bottom:1px solid var(--line);padding:12px 20px}
+  h1{margin:0 0 8px;font-size:17px}
+  .meta{color:var(--tx2);font-size:12px}
+  .bar{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+  input,select{font:inherit;padding:7px 10px;border:1px solid var(--line);border-radius:6px;background:#fff}
+  input#q{flex:1;min-width:240px}
+  main{display:grid;grid-template-columns:320px 1fr;gap:16px;padding:16px 20px;align-items:start}
+  .list{background:#fff;border:1px solid var(--line);border-radius:8px;max-height:calc(100vh - 190px);overflow:auto}
+  .item{padding:9px 12px;border-bottom:1px solid var(--line);cursor:pointer}
+  .item:hover{background:#f0f6fc}
+  .item.on{background:#e8f1fa;border-left:3px solid var(--blue);padding-left:9px}
+  .item b{display:block;font-size:13px}
+  .item span{color:var(--tx2);font-size:12px}
+  .tag{display:inline-block;font-size:11px;padding:1px 6px;border-radius:10px;margin-left:6px;vertical-align:1px}
+  .t-ind{background:#fdece3;color:var(--org)}
+  .t-chn{background:#eef2f6;color:var(--tx2)}
+  .detail{background:#fff;border:1px solid var(--line);border-radius:8px;padding:18px 20px;min-height:300px}
+  .detail h2{margin:0 0 4px;font-size:18px}
+  .sub{color:var(--tx2);font-size:12px;margin-bottom:14px}
+  .sec{font-weight:700;color:var(--blue);margin:16px 0 6px;padding-bottom:4px;border-bottom:1px solid var(--line)}
+  pre{white-space:pre-wrap;word-break:break-word;background:#fafbfc;border:1px solid var(--line);border-radius:6px;padding:10px 12px;margin:0;font:13px/1.7 inherit}
+  table{border-collapse:collapse;width:100%;font-size:13px}
+  td{border-bottom:1px solid var(--line);padding:6px 8px;vertical-align:top}
+  td.k{width:150px;color:var(--tx2);background:#fafbfc;white-space:nowrap}
+  .warn{background:#fff8e6;border:1px solid #ffe1a8;color:#8a6100;border-radius:6px;padding:8px 10px;font-size:12px;margin-top:10px}
+  .empty{color:var(--tx2);padding:40px 0;text-align:center}
+  a{color:var(--blue)}
+  @media(max-width:900px){main{grid-template-columns:1fr}.list{max-height:260px}}
+</style>
+</head>
+<body>
+<header>
+  <h1>TP-LINK 选型备份 <span class="meta" id="cnt"></span></h1>
+  <div class="meta" id="meta"></div>
+  <div class="bar">
+    <input id="q" placeholder="搜型号 / 名称 / 品类 / 描述 / 规格，空格分隔=同时满足">
+    <select id="cat"><option value="">全部品类</option></select>
+    <select id="kind"><option value="">渠道+行业</option><option value="1">仅行业产品</option><option value="0">仅渠道产品</option></select>
+    <select id="sort"><option value="model">按型号</option><option value="cat">按品类</option></select>
+  </div>
+</header>
+<main>
+  <div class="list" id="list"></div>
+  <div class="detail" id="detail"><div class="empty">左侧选一个型号</div></div>
+</main>
+<script>
+/*__DATA__*/
+const P = Object.values(window.__DATA__.products||{});
+const META = window.__DATA__.meta||{};
+document.getElementById('meta').textContent =
+  `来源 $DEALER_BASE（平台价格不真实，已弃用）· 规格取自官网公开接口 · 备份于 ${META.updated||''} · 共 ${P.length} 个型号`;
+const catSel = document.getElementById('cat');
+[...new Set(P.map(p=>p.cat1).filter(Boolean))].sort().forEach(c=>{
+  const o=document.createElement('option'); o.value=c; o.textContent=c; catSel.appendChild(o);
+});
+function hay(p){
+  return [p.model,p.name,p.cat1,p.cat2,p.brand,p.desc||'',
+          (p.spec||[]).map(s=>s.name+' '+(s.values||[]).join(' ')).join(' ')]
+          .join(' ').toLowerCase();
+}
+P.forEach(p=>p._h=hay(p));
+let cur=null;
+function render(){
+  const q=document.getElementById('q').value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const c=catSel.value, k=document.getElementById('kind').value, sort=document.getElementById('sort').value;
+  let rows=P.filter(p=>(!q.length||q.every(w=>p._h.includes(w)))
+    && (!c||p.cat1===c) && (k==='' || String(p.industry?'1':'0')===k));
+  rows.sort((a,b)=> sort==='cat'
+    ? ((a.cat1||'')+(a.cat2||'')+a.model).localeCompare((b.cat1||'')+(b.cat2||'')+b.model)
+    : a.model.localeCompare(b.model));
+  document.getElementById('cnt').textContent = `（命中 ${rows.length} / ${P.length}）`;
+  const L=document.getElementById('list');
+  L.innerHTML = rows.length? rows.map((p,i)=>
+    `<div class="item${p===cur?' on':''}" data-m="${esc(p.model)}">
+       <b>${esc(p.model)}<span class="tag ${p.industry?'t-ind':'t-chn'}">${p.industry?'行业':'渠道'}</span></b>
+       <span>${esc(p.name||'')}</span>
+     </div>`).join('') : '<div class="empty">没有匹配的型号</div>';
+  L.querySelectorAll('.item').forEach(el=>el.onclick=()=>pick(el.dataset.m));
+}
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]))}
+function pick(m){
+  cur=P.find(p=>p.model===m); render();
+  const p=cur, d=document.getElementById('detail');
+  d.innerHTML=`
+    <h2>${esc(p.model)} <span class="tag ${p.industry?'t-ind':'t-chn'}">${p.industry?'行业产品':'渠道产品'}</span></h2>
+    <div class="sub">${esc(p.name||'')} ｜ ${esc(p.cat1||'')} / ${esc(p.cat2||'')} ｜ 品牌 ${esc(p.brand||'')}
+      ${p.official_url?`｜ <a href="${esc(p.official_url)}" target="_blank">官网页</a>`:''}</div>
+    <div class="sec">产品描述</div>
+    <pre>${esc(p.desc||'（无）')}</pre>
+    <div class="sec">规格参数（${(p.spec||[]).length} 项）</div>
+    ${(p.spec&&p.spec.length)? `<table>${p.spec.map(s=>
+        `<tr><td class="k">${esc(s.name)}</td><td>${esc((s.values||[]).join(' / '))}</td></tr>`).join('')}</table>`
+      : '<div class="empty">该型号无规格数据（官网无对应产品页）</div>'}
+    <div class="warn">数据源：普联合作伙伴平台 + 官网公开接口；平台价格不真实，本表不含价格。选型请以端口/带机量/规格为准。</div>`;
+}
+['q','cat','kind','sort'].forEach(id=>document.getElementById(id).addEventListener('input',render));
+render();
+</script>
+</body>
+</html>

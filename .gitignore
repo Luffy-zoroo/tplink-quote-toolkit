@@ -1,0 +1,22 @@
+# ===== 各人自己的配置，绝不提交 =====
+config.local.json
+**/config.local.json
+tplink-toolkit.config.json
+
+# ===== 数据文件（公司内部数据，绝不提交）=====
+tplink_*.json
+data/
+tplink选型备份.html
+*.xlsx
+*.xls
+
+# ===== 备份 / 临时 / 缓存 =====
+*.bak*
+*.tmp
+__pycache__/
+*.pyc
+.pytest_cache/
+crm_eol_result.md
+
+# 例外：技能自带的分类规则词库，必须提交
+!skills/tplink-quote-autofill/scripts/items_nat.json

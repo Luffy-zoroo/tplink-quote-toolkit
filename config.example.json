@@ -1,0 +1,30 @@
+{
+  "_help_1": "把本文件复制到 ~/.workbuddy/tplink-toolkit.config.json（Windows 即 C:\\Users\\<你的用户名>\\.workbuddy\\tplink-toolkit.config.json），然后按自己的情况填写。",
+  "_help_2": "路径写正斜杠最省事：D:/data/x.json。留空的项使用默认行为：只读源留空会提示未配置；可写备份留空会落到 ~/.workbuddy/tplink-toolkit/data/ 下。",
+  "_help_3": "crm_base / dealer_base 是组织内部系统地址（本仓库不内置，需按你所在组织填写）；不填则相关取价功能会跳过，参数部分仍可正常使用。",
+  "_help_4": "crm / dealer 是登录内部系统的账号，只有本单位员工才有。",
+  "_help_5": "pricing_default：你没说明定价策略时，默认执行的策略（自然语言）。例：'监控和网络走片区折扣，其余走总部折扣'。留空=每次仍必问。",
+
+  "kongbiao_json": "",
+  "fw_spec_json": "",
+  "dealer_backup_json": "",
+  "price_backup_json": "",
+  "license_map_json": "",
+  "weekly_report_root": "",
+
+  "crm_base": "",
+  "dealer_base": "",
+
+  "crm": {
+    "email": "",
+    "password": ""
+  },
+  "dealer": {
+    "phone": "",
+    "password": ""
+  },
+
+  "pricing_default": "",
+
+  "proxy": ""
+}

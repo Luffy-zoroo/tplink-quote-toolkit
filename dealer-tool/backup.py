@@ -2,6 +2,7 @@
 
 用法示例：
   python backup.py login                        # 验证账号
+  python backup.py refresh                      # ★每周增量刷新（只拉列表，约十几秒）
   python backup.py taxonomy                     # 备份品类树与规格筛选项
   python backup.py cat 交换机                   # 抓某品类全部产品（含描述+规格）入库
   python backup.py search NS650                 # 按关键词搜（默认入库）
@@ -23,7 +24,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from dealer_api import Dealer, BASE, UA            # noqa: E402
+from dealer_api import Dealer, UA, dealer_base    # noqa: E402
 import store as S                                  # noqa: E402
 
 # 凭据不写死在代码里（2026-10-18 安全整改）：
@@ -51,12 +52,32 @@ def require_creds():
 BRAND_MAP = {'TP': 'TPLINK', 'MERCURY': 'MERCURY', 'FAST': 'FAST'}
 SKIP_CATS = {'特价/清仓'}
 
+# 平台**列表行**就带的字段 → 刷新这些不用拉详情（0.29s/条 那步可省）
+# 本地字段名 : 平台列表字段名
+LIST_FIELDS = {
+    'name': 'productName',
+    'cat1': 'firstCategoryName',
+    'cat2': 'secondCategoryName',
+    'productId': 'productId',
+    'officialRelateId': 'officialRelateId',
+    'brand': 'brandValue',
+    'industry': 'projectProduct',      # 行业产品标记（选型优先档要用）
+    'dealerProductType': 'dealerProductType',
+    'price_untrusted': 'price',        # 平台价不可信，只作量级参考
+    'boxNumber': 'boxNumber',
+    'halt': 'haltProduct',             # 停产标记，选型前必看
+}
+
 
 # ---------------- 官网公开规格接口 ----------------
 def product_info(official_id, brand='TPLINK'):
     url = ('https://www.tp-link.com.cn/publicservice/productinfo?'
            + urllib.parse.urlencode({'brand': brand, 'productModel': official_id}))
-    req = urllib.request.Request(url, headers={'User-Agent': UA, 'Referer': BASE + '/'})
+    try:
+        ref = dealer_base() + '/'          # 内部平台地址来自配置，不能写死
+    except Exception:
+        ref = 'https://www.tp-link.com.cn/'  # 未配置时退回官网，够过防盗链
+    req = urllib.request.Request(url, headers={'User-Agent': UA, 'Referer': ref})
     txt = urllib.request.urlopen(req, timeout=40).read().decode('utf-8', 'replace')
     if not txt.startswith('var PRODUCT_INFO='):
         return {}
@@ -247,6 +268,119 @@ def cmd_all(d, a):
     print('完成：共入库 %d 条 → %s' % (grand, a.store))
 
 
+def cmd_refresh(d, a):
+    """每周增量刷新：只拉列表（十几秒），更新存量状态 + 补新增型号详情。
+
+    为什么不做全量重拉：详情 0.29s/条 × 2000+ 条 ≈ 11 分钟，而规格参数几乎不随时间变。
+    本命令只更新「列表行就带」的字段（在售/停产/行业/类目/价格量级），
+    新增型号才去拉详情；消失的型号**不删除**，只打 missing_since 标记。
+
+    ⚠ 已知坑（本命令存在的原因）：fetch_rows 的断点续跑按「已有 desc+spec」跳过，
+    已入库型号**永远不会被重新抓**，平台后来改的 haltProduct 会丢。
+    走列表行更新就绕开了这个坑，不用拉详情也能把停产状态刷对。
+    """
+    t0 = time.time()
+    st = S.load(a.store)
+    old = st['products']
+
+    bc = d.brand_category()['result']
+    st['taxonomy'] = {'brands': bc.get('brandList'), 'modules': bc.get('moduleList'),
+                      'categories': bc.get('categoryList'), 'specs': bc.get('specsList'),
+                      'updated': time.strftime('%Y-%m-%d %H:%M:%S')}
+    cats = [c for c in (bc.get('categoryList') or []) if c['categoryName'] not in SKIP_CATS]
+    if a.module:
+        cats = [c for c in cats if c.get('module') in a.module]
+    if not cats:
+        print('没有匹配的品类'); return
+
+    # ---- 1) 拉全站列表（只要列表，不拉详情）----
+    by_model, total_rows = {}, 0
+    for c in cats:
+        rows = paged_rows(d, cat_id=c['categoryId'], verbose=False)
+        total_rows += len(rows)
+        for r in rows:
+            m = r.get('productModel')
+            if m:
+                by_model[m] = r
+    print('列表拉完：%d 个品类 / %d 行 → 去重 %d 个型号  (%.1fs)'
+          % (len(cats), total_rows, len(by_model), time.time() - t0))
+    if not by_model:
+        print('⚠ 一条列表都没拉到（网络或权限问题），本次不落盘'); return
+
+    new_models = [m for m in by_model if m not in old]
+    gone_models = [m for m in old if m not in by_model]
+
+    # ---- 2) 存量型号：只更新列表级字段 ----
+    changed = []
+    for m, row in by_model.items():
+        rec = old.get(m)
+        if rec is None:
+            continue
+        for local_k, plat_k in LIST_FIELDS.items():
+            v = row.get(plat_k)
+            if local_k in ('industry', 'halt'):
+                v = bool(v)                    # 平台 None/False 一律视为「否」
+            elif v in (None, '', [], {}):
+                continue                       # 平台没给值就别把本地覆盖成空
+            ov = rec.get(local_k)
+            cmp_old = bool(ov) if local_k in ('industry', 'halt') else ov
+            if cmp_old != v:
+                changed.append((m, local_k, ov, v))
+            rec[local_k] = v
+        rec.pop('missing_since', None)         # 重新出现 → 清掉消失标记
+        rec['seen'] = time.strftime('%Y-%m-%d')
+
+    # ---- 3) 新增型号：才拉详情 + 官网规格 ----
+    got = 0
+    if new_models:
+        print('新增 %d 个型号，抓详情+规格...' % len(new_models), flush=True)
+        recs = fetch_rows(d, [by_model[m] for m in new_models],
+                          workers=a.workers, want_spec=not a.no_spec, store=st)
+        for rec in recs:
+            if S.upsert(st, rec):
+                got += 1
+
+    # ---- 4) 消失型号：不删，打标记（防漏页误判）----
+    today = time.strftime('%Y-%m-%d')
+    marked = []
+    skipped_missing = False
+    if not a.module and gone_models:
+        ratio = len(gone_models) / max(len(old), 1)
+        if ratio > 0.10:
+            skipped_missing = True             # 一次消失超 10%，大概率是漏页/权限变动
+        else:
+            for m in gone_models:
+                old[m]['missing_since'] = today
+                marked.append(m)
+
+    st['_meta']['last_refresh'] = time.strftime('%Y-%m-%d %H:%M:%S')
+    if not a.no_save:
+        S.save(st, a.store)
+
+    # ---- 5) 报告 ----
+    halted = [m for m, r in old.items() if r.get('halt')]
+    lacking = [m for m in by_model if m in old and not (old[m].get('spec')
+                                                       and old[m].get('desc'))]
+    print('---------- 刷新报告 ----------')
+    print('新增型号        : %d %s' % (len(new_models), new_models[:10]))
+    print('本次未见(下架)  : %d %s' % (len(gone_models), gone_models[:10]))
+    if skipped_missing:
+        print('  ⚠ 未见比例 %.0f%% > 10%%，疑似漏页/权限变动，**未打标记**，建议重跑一次'
+              % (ratio * 100))
+    elif marked:
+        print('  已打 missing_since=%s（保留记录，选型时提示下架）' % today)
+    print('字段变化        : %d 处' % len(changed))
+    for m, k, ov, nv in changed[:15]:
+        print('   %-30s %-16s %r → %r' % (m, k, ov, nv))
+    if len(changed) > 15:
+        print('   ...（其余 %d 处省略）' % (len(changed) - 15))
+    print('当前停产型号    : %d 个%s' % (len(halted), ('（' + ', '.join(halted[:6]) + '）') if halted else ''))
+    print('缺描述/规格     : %d 个%s' % (len(lacking), ('（建议对它们跑 models）') if lacking else ''))
+    print('本地总条数      : %d' % len(old))
+    print('上次刷新        : %s' % st['_meta']['last_refresh'])
+    print('耗时            : %.1fs' % (time.time() - t0))
+
+
 # ---------------- 离线 ----------------
 def cmd_show(d, a):
     st = S.load(a.store)
@@ -291,13 +425,18 @@ def cmd_stats(d, a):
     st = S.load(a.store)
     ps = st['products']
     from collections import Counter
+    meta = st.get('_meta', {})
     print('本地备份:', a.store)
     print('产品数  :', len(ps))
     print('含规格  :', sum(1 for r in ps.values() if r.get('spec')))
     print('含描述  :', sum(1 for r in ps.values() if r.get('desc')))
+    print('已停产  :', sum(1 for r in ps.values() if r.get('halt')))
+    missing = [m for m, r in ps.items() if r.get('missing_since')]
+    print('平台已下架:', len(missing), ('（' + ', '.join(missing[:8]) + '）') if missing else '')
     print('渠道/行业:', Counter('行业' if r.get('industry') else '渠道' for r in ps.values()).most_common())
     print('一级品类:', Counter(r.get('cat1') for r in ps.values()).most_common(15))
-    print('_meta   :', st.get('_meta', {}).get('updated'))
+    print('_meta   :', meta.get('updated'))
+    print('上次刷新:', meta.get('last_refresh') or '（从未 refresh，建议跑一次）')
 
 
 def fetch_one_fast(row, retry=2):
@@ -391,9 +530,9 @@ def main():
     p.add_argument('--fast', action='store_true', help='fill 时只打官网接口（快一倍）')
     p.add_argument('--out', default=None)
     sub = p.add_subparsers(dest='cmd', required=True)
-    for name in ['login', 'taxonomy', 'all', 'stats', 'html', 'fill']:
+    for name in ['login', 'taxonomy', 'all', 'refresh', 'stats', 'html', 'fill']:
         s = sub.add_parser(name)
-        if name == 'all':
+        if name in ('all', 'refresh'):
             s.add_argument('--module', nargs='*', default=None)
     for name in ['cat', 'search', 'models', 'show', 'find']:
         s = sub.add_parser(name)
@@ -403,8 +542,8 @@ def main():
     need_net = a.cmd not in ('stats', 'html', 'show', 'find')
     d = Dealer(*require_creds()) if need_net else Dealer()
     {'login': cmd_login, 'taxonomy': cmd_taxonomy, 'cat': cmd_cat, 'search': cmd_search,
-     'models': cmd_models, 'all': cmd_all, 'show': cmd_show, 'find': cmd_find,
-     'stats': cmd_stats, 'html': cmd_html, 'fill': cmd_fill}[a.cmd](d, a)
+     'models': cmd_models, 'all': cmd_all, 'refresh': cmd_refresh, 'show': cmd_show,
+     'find': cmd_find, 'stats': cmd_stats, 'html': cmd_html, 'fill': cmd_fill}[a.cmd](d, a)
 
 
 if __name__ == '__main__':

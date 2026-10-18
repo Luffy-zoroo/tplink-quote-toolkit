@@ -99,13 +99,18 @@ python 生成配置.py               # 自动把配置里的数据路径指向�
 | 文件 | 作用 | 没有会怎样 | 怎么获得 |
 |---|---|---|---|
 | `tplink_kongbiao_data.json` | 控标参数库 | 参数全走官网抓，慢、覆盖少、**没有 ★ 加分项** | 内部整理维护，按 `{category, product_name, model, params_raw, param_items}` 结构往里加 |
-| `tplink_dealer_backup.json` | 选型库 | **选型阶段找不到候选型号**（`pick.py` 检索不到） | `python dealer-tool/backup.py --all`（需合作伙伴平台账号） |
+| `tplink_dealer_backup.json` | 选型库 | **选型阶段找不到候选型号**（`pick.py` 检索不到） | `python dealer-tool/backup.py all`（首次全量，需合作伙伴平台账号）；之后每周 `backup.py refresh`（20 秒增量） |
 | `tplink_crm_price_backup.json` | 价格本地备份 | 无网时查不到历史价格，只能实时连 CRM | 用 `price_cache.py` 查过就会自动落盘，慢慢攒 |
 | `tplink_fw_spec_*.json` | 防火墙官方规格 | 带机量核算退回控标库 | 从官网整理 |
 | `tplink_license_map.json` | 多合一 License 映射 | 防火墙授权 SKU 只能逐个联网查 | `python dealer-tool/license.py --all` |
 
 > ⚠️ 现在工作流是**选型前置**，所以 **`tplink_dealer_backup.json` 是最关键的一个**——
 > 没有它，第一步「选型」就没有候选可挑，只能凭型号直接查参数。
+
+> 🔄 **选型库要定期刷新**（平台会新增型号、下架老品、改类目）。每周跑一次 `python backup.py refresh`，
+> 约 20 秒，只拉列表：更新在售/停产/行业/类目，**新增型号**才补详情，下架的**保留但打标记**。
+> 新增型号若带出新系列/新焦距，记得同步更新选型规则。详见
+> [`quote-autofill/SKILL.md`](skills/tplink-quote-autofill/SKILL.md) 的「选型取数」章节。
 
 > 💡 **最省事的起手式**：先只配 `kongbiao_json`（或干脆先不配），
 > 把清单丢进去跑一遍看效果；价格那部分等你有了 CRM 账号再开。

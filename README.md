@@ -71,7 +71,24 @@ python 生成配置.py               # 自动把配置里的数据路径指向�
 编辑 `~/.workbuddy/tplink-toolkit.config.json`，填 `crm_base` / `dealer_base` 和账号。
 格式照 `config.example.json` 的注释填。**不填也能用**：参数功能正常，取价会跳过并提示。
 
-**4）重启 WorkBuddy**，然后在对话里直接说：
+**4）自检**：确认装对了再动手
+
+```bash
+python 自检.py
+```
+
+它会分两组查：**代码卫生**（有没有内部域名 / 手机号 / 本机路径、数据文件有没有误入库、10 份配置副本是否一致）
+和**运行能力**（Python 与 openpyxl、配置文件在不在、五个数据文件读不读得到、三项自测）。
+
+最后给 `OK / WARN / FATAL` 三个结论：
+
+- **FATAL** 必须先解决，通常会直接指出「哪个路径不对」以及怎么修
+- **WARN** 可以带着跑，但能力会弱（比如没配防火墙规格，带机量核算会退回控标库）
+- 全部 OK 就是可以交付的状态
+
+> 只查仓库卫生、不需要数据文件时用 `python 自检.py --repo-only`，push 前跑这个就够。
+
+**5）重启 WorkBuddy**，然后在对话里直接说：
 
 > 把这个清单的控标参数和价格补一下（把 Excel 拖进来）
 
@@ -268,6 +285,7 @@ tplink-quote-toolkit/
 ├── README.md
 ├── config.example.json          ← 配置模板（每个字段的含义/留空行为都写在里面，可交给 AI 照着配）
 ├── install.py                   ← 一键安装
+├── 自检.py                       ← 装完 / 改完跑一次，查「能不能用」和「有没有泄露」
 ├── skills/                      ← WorkBuddy 技能（装到 ~/.workbuddy/skills/）
 │   ├── tplink-quote-autofill/   ← 核心：填参数 + 算价
 │   ├── tplink-crm-readonly/     ← CRM 只读取价

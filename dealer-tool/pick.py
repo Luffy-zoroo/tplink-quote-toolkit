@@ -34,7 +34,20 @@ def blob(r):
 
 def load():
     st = S.load()
-    return st['products']
+    ps = st['products']
+    if not ps:
+        # 库是空的要说清楚原因（2026-10-19 实测：路径配错时只报"命中 0 条"，
+        # 会被误读成"库里没有这个产品"）。store.load() 在文件不存在时静默返回空库，
+        # 这里补一层诊断，不改变上层逻辑。
+        p = S.DEFAULT_STORE
+        sys.stderr.write(
+            '[选型库] 读到 0 条：%s\n'
+            '  只可能是这三种原因，按顺序查：\n'
+            '    1) 文件不存在 → 数据包里的 数据/2-选型库.json 有没有拷到该位置\n'
+            '    2) 路径配错   → ~/.workbuddy/tplink-toolkit.config.json 的 dealer_backup_json\n'
+            '    3) 还没备份过 → 跑 backup.py refresh 拉一次（需合作伙伴平台账号）\n'
+            '  查当前实际读的是哪个文件：python tpkit_config.py\n' % p)
+    return ps
 
 
 def search(kws, cat=None, brand=None, industry=None, limit=40, kbs=None):

@@ -39,6 +39,13 @@ except Exception:
 import openpyxl
 from openpyxl.styles import Alignment
 
+# 交付门禁（同目录 deliver_gate.py）：每段交付后必须问用户、确认后才许进下一段。
+# 拿不到模块时**降级为只打提示**，不能因为门禁缺失就让填表跑不了。
+try:
+    import deliver_gate as gate
+except Exception:
+    gate = None
+
 # 同目录脚本
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sanitize_params import sanitize_multiline, scan_text          # noqa: E402
@@ -559,7 +566,17 @@ def main():
                          '{"mode":"by_field","field":"seriesValue",'
                          '"values":["项目机型"],"rate":0.34} 或 '
                          '{"mode":"none"} 表示全部取标准价')
+    ap.add_argument('--no-gate', action='store_true',
+                    help='跳过交付门禁（仅批量/调试用；正常配单不要加，'
+                         '加了就不会强制向用户要反馈）')
     a = ap.parse_args()
+
+    # ---- 交付门禁：上一段没确认，不许开工 ----
+    # stage：只填参数(--no-crm) 记为 params；连价格一起填记为 autofill。
+    # 门禁只看「同项目的上一段有没有 clear」，与业务逻辑无关，读表之前先挡。
+    stage = 'params' if a.no_crm else 'autofill'
+    if gate and not a.no_gate:
+        gate.require_clear(stage, a.xlsx)
 
     # ⚠️ 安全闸：默认列位是 I/J/K，但清单的实际列位经常不同（如参数在 G、数量在 I）。
     #    若用户没显式指定列位，且默认列完全对不上，就在写文件**之前**停下来问清楚，
@@ -786,6 +803,13 @@ def main():
             print('  行%-4s %-28s 去掉: %s' % (x['row'], x['model'][:26], '、'.join(x['brand_words_removed'])))
         if len(warn) > 30:
             print('  … 共 %d 行' % len(warn))
+
+    # ---- 交付回执（最后一块，必须在所有提示之后） ----
+    # 这不是"建议"，是流程的强制断点：不打这一段，用户就不知道要反馈什么；
+    # 不 clear，下一段脚本会退出码 3 拒绝执行。
+    if gate and not a.no_gate:
+        gate.deliver(stage, a.xlsx, rows=n_p + n_k,
+                     note='参数 %d 行 / 价格 %d 行' % (n_p, n_k))
 
 
 def _selftest_combo():

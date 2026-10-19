@@ -11,6 +11,37 @@ import sys, re, json, os, argparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import store as S
 
+
+def _load_gate():
+    """跨目录加载交付门禁（deliver_gate.py 只在技能目录里放一份，不复制）。
+
+    找不到就返回 None —— 选型检索不能因为门禁模块缺失而用不了。
+    """
+    import importlib.util
+    here = os.path.dirname(os.path.abspath(__file__))
+    cands = [
+        # 安装后的标准位置（install.py 装技能到这里）
+        os.path.join(os.path.expanduser('~'), '.workbuddy', 'skills',
+                     'tplink-quote-autofill', 'scripts', 'deliver_gate.py'),
+        # 仓库/开发态：dealer-tool 与 skills 同级
+        os.path.join(here, '..', 'skills', 'tplink-quote-autofill',
+                     'scripts', 'deliver_gate.py'),
+    ]
+    for p in cands:
+        p = os.path.normpath(p)
+        if os.path.exists(p):
+            try:
+                spec = importlib.util.spec_from_file_location('deliver_gate', p)
+                m = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(m)
+                return m
+            except Exception:
+                return None
+    return None
+
+
+gate = _load_gate()
+
 NET_CATS = None
 
 
@@ -98,6 +129,10 @@ if __name__ == '__main__':
     ap.add_argument('--keys', default='')
     ap.add_argument('--model')
     ap.add_argument('--show', action='store_true')
+    ap.add_argument('--project', default='',
+                    help='清单文件名（和 autofill_quote.py 的 --xlsx 用同一个），'
+                         '用于交付门禁按项目记账；不填记到 default')
+    ap.add_argument('--no-gate', action='store_true', help='不登记交付（纯查询）')
     a = ap.parse_args()
     if a.model:
         ps = load()
@@ -114,4 +149,18 @@ if __name__ == '__main__':
     print('命中 %d 条（显示前 %d）\n' % (len(res), a.limit))
     for r in res:
         print(brief(r, keys))
+        print()
+
+    # ---- 交付登记（门禁）----
+    # 每次检索都记一次「选型待确认」：下一段填参数/价格会被强制拦住（退出码 3），
+    # 直到把选型结果拿去问用户、拿到回答再 clear。这是流程断点，不是提示。
+    if gate and not a.no_gate:
+        gate.deliver('select', a.project, rows=len(res), quiet=True)
+        print('🔁 已登记为「选型待用户确认」——填参数/价格前必须先问用户。')
+        if not a.project:
+            print('   ⚠ 没传 --project，记在 default 下。'
+                  '要和 autofill_quote.py 对上，请传同一个清单文件名：')
+            print('     pick.py ... --project "某清单.xlsx"')
+        print('   用户确认后：python deliver_gate.py clear select --verdict ok --project "%s"'
+              % (a.project or 'default'))
         print()

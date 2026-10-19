@@ -52,7 +52,9 @@ FORBIDDEN = [
     (r"dealer\.tp-link\.com\.cn", "合作伙伴平台域名"),
     (r"\b1[3-9]\d{9}\b", "手机号"),
     (r"[A-Za-z]:[\\/](?:lzy|Users[\\/]admin)", "本机绝对路径"),
-    (r"工作在南昌办", "内部共享目录名"),
+    # 内部共享目录名：故意拆成两段拼接。
+    # 检测器本身是公开代码，**把要检的敏感串原样写进来，等于自己泄露一次**。
+    (r"工作在" + "南昌办", "内部共享目录名"),
 ]
 SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "node_modules"}
 SKIP_EXT = {".pyc", ".pyo", ".zip", ".xlsx", ".xls", ".png", ".jpg"}
@@ -231,6 +233,28 @@ def check_runtime():
         except Exception as exc:
             fatal("选型库读不了（JSON 坏了）：%s" % exc)
             print("  FATAL 选型库读不了：%s" % exc)
+
+    # 交付门禁（反馈闭环）
+    # 缺了不会让填表跑不了（脚本会自动降级），但「交付后强制要反馈」就失效了，
+    # 开源项目最怕的就是这个——用的人多、提意见的少。所以报 WARN 不报 OK。
+    g = os.path.join(SCRIPT_DIR, "deliver_gate.py")
+    if not os.path.exists(g):
+        warn("缺 deliver_gate.py —— 反馈闭环不生效（填表仍可用）")
+        print("  WARN   %-18s 缺失，交付后不会强制要反馈" % "交付门禁")
+    else:
+        try:
+            r = subprocess.run([sys.executable, "-X", "utf8", g, "status"],
+                               cwd=SCRIPT_DIR, capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=30)
+            if r.returncode == 0:
+                ok("交付门禁可用")
+                print("  OK   %-18s 交付后强制要反馈，未确认不许进下一段" % "交付门禁")
+            else:
+                warn("交付门禁跑不起来：%s" % (r.stderr or "")[:100])
+                print("  WARN   %-18s 跑不起来" % "交付门禁")
+        except Exception as exc:
+            warn("交付门禁异常：%s" % exc)
+            print("  WARN   %-18s 异常：%s" % ("交付门禁", exc))
 
     # 三项自测
     if not os.path.isdir(SCRIPT_DIR):

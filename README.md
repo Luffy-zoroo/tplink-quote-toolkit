@@ -207,6 +207,60 @@ copy 新版控标库.json D:\...\tplink_kongbiao_data.json
 
 ---
 
+## 协作改动与审核
+
+用着用着发现规则不对、想加一条，先分清是哪种改动：
+
+| 你想改 | 改哪 | 影响范围 |
+|---|---|---|
+| 我自己的口径（定价策略、默认型号） | **配置** `~/.workbuddy/tplink-toolkit.config.json` | 只有你自己 |
+| 这一单特殊情况 | 不用改，处理时说明一句即可 | 无 |
+| 通用规则写错 / 缺一条 | **仓库源码** → 走 PR（见下） | 所有人（审核合并后） |
+
+### 提交改动：Pull Request，不是直接推 main
+
+仓库是公开的，**除仓库所有者外，其他人对 `main` 没有写权限**——这是有意的，
+防止一个人的误改把所有人装到坏版本上。
+
+```bash
+# 1. GitHub 网页上点 Fork，把仓库复制到你自己的账号下
+git clone https://github.com/<你的账号>/tplink-quote-toolkit.git
+cd tplink-quote-toolkit
+
+# 2. 改 skills/ 下的 SKILL.md 或脚本（改 clone 这份，不是 ~/.workbuddy/skills/）
+
+# 3. 提交并推到你自己的 fork
+git add -A
+git commit -m "改了什么、为什么改"
+git push
+
+# 4. 网页上点 Compare & pull request，写清改的动机
+```
+
+**审核流程**：仓库所有者在 GitHub 上看 diff → 认可才点 Merge。
+**合并前，你的改动只存在你自己的 fork 里，不影响任何人。**
+
+> ⚠️ **不要直接改 `~/.workbuddy/skills/` 下的文件**：那是 `install.py` 装出来的副本，
+> 下次重装整个删掉重建，改动会静默消失，而且**你以为改了、其实别人一点没变**。
+
+### 仓库所有者：开启分支保护（一次性设置）
+
+防止误推 main，也防止将来加的协作者绕过审核：
+
+1. 打开 `https://github.com/<用户名>/tplink-quote-toolkit/settings/branches`
+2. **Add branch protection rule**（或 Add classic branch protection rule）
+3. Branch name pattern 填 `main`
+4. 勾选：
+   - **Require a pull request before merging**（必须走 PR）
+   - **Require approvals** → 1（至少 1 人批准）
+   - **Do not allow bypassing the above settings**（连自己也不能绕过）
+5. Save
+
+> 单人维护时第 4 步的「Require approvals」可以先把批准人数设为 0，
+> 只强制走 PR——这样自己改也得先开个 PR 再合并，留一条可追溯的记录。
+
+---
+
 ## 目录结构
 
 ```

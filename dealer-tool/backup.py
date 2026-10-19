@@ -330,15 +330,25 @@ def cmd_refresh(d, a):
         rec.pop('missing_since', None)         # 重新出现 → 清掉消失标记
         rec['seen'] = time.strftime('%Y-%m-%d')
 
-    # ---- 3) 新增型号：才拉详情 + 官网规格 ----
-    got = 0
-    if new_models:
-        print('新增 %d 个型号，抓详情+规格...' % len(new_models), flush=True)
+    # ---- 3) 抓详情 ----
+    got, tried = 0, 0
+    if a.deep:
+        # 全量重抓：store=None 关掉断点续跑（否则已有 desc+spec 的会被整批跳过）
+        tried = len(by_model)
+        print('深度刷新：全量重抓 %d 个型号（平台详情 + 官网规格），预计 5~10 分钟...'
+              % tried, flush=True)
+        recs = fetch_rows(d, list(by_model.values()), workers=a.workers,
+                          want_spec=not a.no_spec, store=None, verbose=True)
+    elif new_models:
+        tried = len(new_models)
+        print('新增 %d 个型号，抓详情+规格...' % tried, flush=True)
         recs = fetch_rows(d, [by_model[m] for m in new_models],
                           workers=a.workers, want_spec=not a.no_spec, store=st)
-        for rec in recs:
-            if S.upsert(st, rec):
-                got += 1
+    else:
+        recs = []
+    for rec in recs:
+        if S.upsert(st, rec):
+            got += 1
 
     # ---- 4) 消失型号：不删，打标记（防漏页误判）----
     today = time.strftime('%Y-%m-%d')
@@ -354,6 +364,8 @@ def cmd_refresh(d, a):
                 marked.append(m)
 
     st['_meta']['last_refresh'] = time.strftime('%Y-%m-%d %H:%M:%S')
+    if a.deep:
+        st['_meta']['last_deep'] = st['_meta']['last_refresh']
     if not a.no_save:
         S.save(st, a.store)
 
@@ -361,7 +373,12 @@ def cmd_refresh(d, a):
     halted = [m for m, r in old.items() if r.get('halt')]
     lacking = [m for m in by_model if m in old and not (old[m].get('spec')
                                                        and old[m].get('desc'))]
+    has_raw = sum(1 for r in old.values() if r.get('detail_raw'))
+    has_sib = sum(1 for r in old.values() if r.get('siblings'))
+    grouped = sum(1 for r in old.values() if any(i.get('group') for i in (r.get('spec') or [])))
     print('---------- 刷新报告 ----------')
+    if tried:
+        print('抓取详情        : %d/%d 成功（失败 %d）' % (got, tried, tried - got))
     print('新增型号        : %d %s' % (len(new_models), new_models[:10]))
     print('本次未见(下架)  : %d %s' % (len(gone_models), gone_models[:10]))
     if skipped_missing:
@@ -376,6 +393,7 @@ def cmd_refresh(d, a):
         print('   ...（其余 %d 处省略）' % (len(changed) - 15))
     print('当前停产型号    : %d 个%s' % (len(halted), ('（' + ', '.join(halted[:6]) + '）') if halted else ''))
     print('缺描述/规格     : %d 个%s' % (len(lacking), ('（建议对它们跑 models）') if lacking else ''))
+    print('数据完整度      : 完整详情 %d / 同系列 %d / 规格带分组 %d' % (has_raw, has_sib, grouped))
     print('本地总条数      : %d' % len(old))
     print('上次刷新        : %s' % st['_meta']['last_refresh'])
     print('耗时            : %.1fs' % (time.time() - t0))
@@ -534,6 +552,9 @@ def main():
         s = sub.add_parser(name)
         if name in ('all', 'refresh'):
             s.add_argument('--module', nargs='*', default=None)
+        if name == 'refresh':
+            s.add_argument('--deep', action='store_true',
+                           help='全量重抓详情+规格（数分钟；默认只抓新增型号）')
     for name in ['cat', 'search', 'models', 'show', 'find']:
         s = sub.add_parser(name)
         s.add_argument('keyword', nargs='+' if name in ('models', 'find') else 1)

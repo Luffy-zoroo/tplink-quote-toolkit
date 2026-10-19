@@ -48,7 +48,12 @@ def save(store, path=DEFAULT_STORE):
 
 
 def flatten_spec(spec_raw):
-    """规格原文（JSON 串或 list）→ [{'group':..,'name':..,'values':[..]}]"""
+    """规格原文（JSON 串或 list）→ [{'group':..,'name':..,'values':[..]}]
+
+    官网结构是三级：spe（大分组，如「图像与视频参数」）→ speItems（子分组，如「基本参数」）
+    → speItemValues（「传感器类型：1/3英寸CMOS」这种 "名称：值" 行）。
+    ⚠ 大分组字段名是 `spe`，不是 `speGroupName` —— 2026-10-18 前漏读，导致 group 全空、分组信息丢失。
+    """
     if not spec_raw:
         return []
     data = spec_raw
@@ -59,7 +64,8 @@ def flatten_spec(spec_raw):
             return []
     out = []
     for grp in data or []:
-        gname = grp.get('speGroupName') or grp.get('groupName') or ''
+        gname = (grp.get('spe') or grp.get('speGroupName')
+                 or grp.get('groupName') or '')
         for it in (grp.get('speItems') or []):
             vals = it.get('speItemValues') or []
             if isinstance(vals, str):
@@ -69,14 +75,25 @@ def flatten_spec(spec_raw):
     return out
 
 
+# 平台详情里已单独映射、不再重复进 detail_raw 的键
+_DETAIL_SKIP = {'productDesc', 'productGroupList'}
+
+
 def make_record(row, detail=None, official=None):
-    """把平台列表行 + 详情 + 官网 PRODUCT_INFO 合成一条本地记录"""
+    """把平台列表行 + 详情 + 官网 PRODUCT_INFO 合成一条本地记录
+
+    「宁滥勿缺」（2026-10-19 用户要求）：平台详情的**全部非空字段**都留在 `detail_raw`，
+    官网规格按三级结构完整展开（大分组 `spe` / 子分组 / 「名称：值」行）。
+    目的：以后选型要用到别的字段时，不用重新登录抓一遍。
+    官网那 128 条视频/常见问题列表（`DOCUMENT`，35 KB/条）**不存**——与选型无关，
+    每条另存会额外撑大 37 MB，属于噪音而非信息。
+    """
     detail = detail or {}
     official = official or {}
     spec = flatten_spec(official.get('specification2') or official.get('specification'))
     if not spec:
         spec = flatten_spec(detail.get('specification'))
-    return {
+    rec = {
         'model': detail.get('productModel') or row.get('productModel'),
         'name': detail.get('productName') or row.get('productName'),
         'productId': detail.get('productId') or row.get('productId'),
@@ -99,6 +116,18 @@ def make_record(row, detail=None, official=None):
                          if official.get('productId') else None),
         'updated': time.strftime('%Y-%m-%d %H:%M:%S'),
     }
+    # 完整平台详情（去空值，省体积但一个有用字段都不丢）
+    raw = {k: v for k, v in detail.items()
+           if k not in _DETAIL_SKIP and v not in (None, '', [], {})}
+    if raw:
+        rec['detail_raw'] = raw
+    # 同系列型号：选型时「这个系列还有哪几款」直接可查，不必再搜一遍
+    sib = [{'model': g.get('productModel'), 'name': g.get('productName')}
+           for g in (detail.get('productGroupList') or [])
+           if g.get('productModel')]
+    if sib:
+        rec['siblings'] = sib
+    return rec
 
 
 def upsert(store, rec):

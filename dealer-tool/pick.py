@@ -25,8 +25,10 @@ def sm(r):
 def blob(r):
     parts = [r.get('model') or '', r.get('name') or '', r.get('desc') or '',
              r.get('cat1') or '', r.get('cat2') or '']
-    for k, v in sm(r).items():
-        parts.append(k + '=' + v)
+    # 规格大分组名（如「图像与视频参数」）也进检索范围，2026-10-19 起 spec 才带上 group
+    for it in (r.get('spec') or []):
+        parts.append('%s %s=%s' % (it.get('group') or '', it.get('name') or '',
+                                   ' / '.join(it.get('values') or [])))
     return '\n'.join(parts)
 
 
@@ -64,7 +66,11 @@ def brief(r, keys=None):
     lines = [head, line2]
     if keys:
         for k in keys:
-            if k in s:
+            if k == 'siblings':          # 同系列型号（detail_raw.productGroupList 提取）
+                sib = [x.get('model') for x in (r.get('siblings') or [])]
+                if sib:
+                    lines.append('   同系列: %s' % ' / '.join(sib))
+            elif k in s:
                 lines.append('   %s: %s' % (k, s[k][:160]))
     return '\n'.join(lines)
 

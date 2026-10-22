@@ -545,6 +545,37 @@ def web_feature(model, sleep=0.3):
 
 
 # ------------------------------------------------------------------ 主流程
+# 价格口径词：出现在报价表里就是泄露
+# （用户 2026-10-22 反馈：清单里老是被写进业务折扣、价格计算方法；
+#   实际发生位置 = 1021 替换清单的 A32「备注：单价为业务折扣后单价…」）
+#
+# ⚠️ "片区"/"总部" 不能单独作词——SD-WAN 参数里正常就有「总部分部互联互通」，
+#    实测会误报，必须要求后面跟"折"。
+_LEAK = re.compile(
+    r'折扣|折率|底价|成本价|进价|成本合计|毛利率|利润率|'
+    r'(?:片区|总部|业务|区域)\s*折|'
+    r'[×✕xX＊*]\s*0\.\d|打\s*[0-9.]+\s*折|按\s*[0-9.]+\s*折|'
+    r'businessDiscount|seriesValue')
+
+
+def scan_price_leak(ws, header_row=1):
+    """扫全表找价格计算口径残留，返回 [(行, 列字母, 片段)]。
+
+    为什么扫全表而不是只扫价格列：模型最常把折扣说明写进**备注列或参数列**，
+    而备注列位置每张清单都不一样（列位不固定），只能全扫。
+    表头行跳过——"折扣率"当列名是清单原有结构，不算泄露。
+    """
+    hits = []
+    for row in ws.iter_rows(min_row=header_row + 1):
+        for c in row:
+            v = c.value
+            if not isinstance(v, str) or not v.strip():
+                continue
+            if _LEAK.search(v):
+                hits.append((c.row, c.column_letter, ' '.join(v.split())[:90]))
+    return hits
+
+
 def main():
     ap = argparse.ArgumentParser(description='按清单型号自动填控标参数 + 价格')
     ap.add_argument('--xlsx', required=True, help='清单 Excel 路径')
@@ -569,6 +600,9 @@ def main():
     ap.add_argument('--no-gate', action='store_true',
                     help='跳过交付门禁（仅批量/调试用；正常配单不要加，'
                          '加了就不会强制向用户要反馈）')
+    ap.add_argument('--allow-price-note', action='store_true',
+                    help='允许表里带价格口径词（仅用于内部成本分析表；'
+                         '对外报价表**不要加**，会把折扣亮给甲方）')
     a = ap.parse_args()
 
     # ---- 交付门禁：上一段没确认，不许开工 ----
@@ -784,6 +818,30 @@ def main():
                 log.append({'row': r, 'model': ms, 'kind': '价格',
                             'is_combo': is_combo(ms), 'parts': parts_log,
                             'note': err})
+
+    # ---- 价格口径泄露闸门（保存前，不通过就不存）----
+    # 折扣率、片区/总部口径、"×0.39" 这类东西只能写在回复里告诉用户，
+    # 一旦落进表里、表又发给甲方，等于把底牌亮出去。宁可中断让人改。
+    leaks = scan_price_leak(ws, a.header_row)
+    if leaks and not a.allow_price_note:
+        bar = '━' * 64
+        msg = ['', bar,
+               '🛑 中止保存：表里有价格计算口径（%d 处）' % len(leaks),
+               bar,
+               '这类内容只能出现在对话回复里，不能写进报价表：']
+        for r, c, t in leaks[:15]:
+            msg.append('  %s%-4d %s' % (c, r, t))
+        if len(leaks) > 15:
+            msg.append('  … 共 %d 处' % len(leaks))
+        msg += [
+            '',
+            '怎么处理：',
+            '  · 把这些单元格里的折扣/成本说明删掉，只留最终单价、小计',
+            '  · 计算过程（折扣档、取整规则）写在回复里告诉用户',
+            '  · 确实要给内部看的成本分析表，才加 --allow-price-note',
+            bar, '']
+        print('\n'.join(msg), file=sys.stderr)
+        sys.exit(4)
 
     # ---- 保存 ----
     target = a.out or a.xlsx

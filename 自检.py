@@ -64,6 +64,33 @@ SKIP_FILES = {"自检.py"}
 ALLOW_LINE = re.compile(r"内网域名|你的组织|本仓库不内置|<.*>|\$CRM_BASE|\$DEALER_BASE")
 
 
+def _changed_sources():
+    """工作区里改了的源文件 + CHANGELOG 本身有没有动。
+
+    返回 (源文件集合, CHANGELOG 是否改动)；读不到 git 状态返回 None（跳过检查，不误报）。
+    """
+    try:
+        out = subprocess.run(["git", "status", "--porcelain"], cwd=ROOT,
+                             capture_output=True, text=True,
+                             encoding="utf-8").stdout
+    except Exception:
+        return None
+    ext_ok = {".py", ".md", ".json", ".html", ".txt"}
+    res, clog = set(), False
+    for line in out.splitlines():
+        if len(line) < 4:
+            continue
+        p = line[3:].strip().strip('"')
+        if " -> " in p:                      # 重命名：取新名
+            p = p.split(" -> ", 1)[1]
+        if os.path.basename(p) == "CHANGELOG.md":
+            clog = True
+            continue
+        if os.path.splitext(p)[1].lower() in ext_ok:
+            res.add(p)
+    return res, clog
+
+
 def check_repo():
     print("\n[A] 代码卫生（push 到 GitHub 前必须全过）")
     print("-" * 62)
@@ -142,6 +169,26 @@ def check_repo():
         else:
             ok("tpkit_config.py 5 份副本 md5 一致")
             print("  OK   tpkit_config.py 5 份副本 md5 一致")
+
+    # CHANGELOG 要和改动一起提交（同事 pull 完只看这一页，不翻 git log）
+    clog = os.path.join(ROOT, "CHANGELOG.md")
+    if not os.path.exists(clog):
+        warn("没有 CHANGELOG.md，同事 pull 完不知道这次改了什么",
+             "新建 CHANGELOG.md，按「改了什么 + 你要不要动手」记一条")
+        print("  WARN 缺少 CHANGELOG.md")
+    else:
+        changed = _changed_sources()
+        if changed is None:
+            ok("CHANGELOG.md 存在（读不到 git 状态，未校验是否同步更新）")
+            print("  OK   CHANGELOG.md 存在")
+        elif changed[0] and not changed[1]:
+            warn("改了 %d 个源文件但 CHANGELOG.md 没动" % len(changed[0]),
+                 "在 CHANGELOG.md 顶部加一条：" + "、".join(sorted(changed[0])[:4])
+                 + ("…" if len(changed[0]) > 4 else ""))
+            print("  WARN 改了 %d 个源文件但 CHANGELOG.md 没动" % len(changed[0]))
+        else:
+            ok("CHANGELOG.md 已随改动更新")
+            print("  OK   CHANGELOG.md 已随改动更新")
 
 
 # ---------------------------------------------------------------- B 组

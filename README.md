@@ -216,6 +216,10 @@ python skills/tplink-quote-autofill/scripts/tpkit_config.py
 
 **代码/技能**和**数据文件**分开更新，互不影响。
 
+> 📋 **每次改了什么，看 [CHANGELOG.md](CHANGELOG.md)。** 那里按日期倒序列出每次推送的改动，
+> 并且标明你要不要动手（🔴 要重装重启 / 🟡 只需 pull / 🟢 与你无关）。
+> 拉之前先扫一眼最新那条，比翻 `git log` 快得多。
+
 ### 代码 / 技能更新
 
 ```bash

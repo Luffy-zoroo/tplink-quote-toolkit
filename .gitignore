@@ -18,5 +18,18 @@ __pycache__/
 .pytest_cache/
 crm_eol_result.md
 
+# ===== 流量归档（本地跑 traffic/archive.py 时生成，数据在 traffic-data 分支）=====
+.traffic-data/
+
+# ===== 网页版多用户（账号、加密后的密码、使用统计）=====
+# 实际落在 %USERPROFILE%\.workbuddy\tplink-toolkit\ ，正常不会进仓库；
+# 这里兜底，防止有人在仓库根目录跑过之后误提交。
+users.json
+usage.db
+*.db
+*.sqlite
+web_pass.txt
+webapp.log
+
 # 例外：技能自带的分类规则词库，必须提交
 !skills/tplink-quote-autofill/scripts/items_nat.json

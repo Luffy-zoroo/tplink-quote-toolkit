@@ -827,21 +827,43 @@ _LEAK = re.compile(
     r'businessDiscount|seriesValue')
 
 
-def scan_price_leak(ws, header_row=1):
-    """扫全表找价格计算口径残留，返回 [(行, 列字母, 片段)]。
+def _leak_text(cell):
+    """这个格子里有没有价格口径词；公式和空值不算。返回片段或 None。
 
-    为什么扫全表而不是只扫价格列：模型最常把折扣说明写进**备注列或参数列**，
-    而备注列位置每张清单都不一样（列位不固定），只能全扫。
-    表头行跳过——"折扣率"当列名是清单原有结构，不算泄露。
+    ⚠️ 必须跳过公式：`=125*0.03` 里的 `*0.03` 会被 _LEAK 当成「×0.03」折扣，
+    实测把整张带税率/系数的客户表卡死（2026-10-27 一张 10 行清单报了 I26/I27）。
+    """
+    if getattr(cell, 'data_type', None) == 'f':
+        return None
+    v = cell.value
+    if not isinstance(v, str) or not v.strip():
+        return None
+    return ' '.join(v.split())[:90] if _LEAK.search(v) else None
+
+
+def scan_price_leak(ws, header_row=1, only_written=None):
+    """找价格计算口径残留，返回 [(行, 列字母, 片段)]。
+
+    only_written：给一组 (row, col_idx) 就只查这些格子。脚本自己只写参数列和
+    价格列，原表原有的公式、汇总区、客户自己的备注不该由我们背锅 —— 只查写入
+    位置，才不会因为「表里本来就有折扣字样」把正常清单卡死（2026-10-27 实测）。
+
+    不给 only_written 就全表扫（旧行为，留给外部调用）。
+    表头行跳过 —— "折扣率"当列名是清单原有结构，不算泄露。
     """
     hits = []
+    if only_written is not None:
+        for r, c in sorted(set(only_written)):
+            cell = ws.cell(r, c)
+            t = _leak_text(cell)
+            if t:
+                hits.append((cell.row, cell.column_letter, t))
+        return hits
     for row in ws.iter_rows(min_row=header_row + 1):
         for c in row:
-            v = c.value
-            if not isinstance(v, str) or not v.strip():
-                continue
-            if _LEAK.search(v):
-                hits.append((c.row, c.column_letter, ' '.join(v.split())[:90]))
+            t = _leak_text(c)
+            if t:
+                hits.append((c.row, c.column_letter, t))
     return hits
 
 
@@ -1008,6 +1030,7 @@ def main():
     # ---- 逐行处理 ----
     log, rows = [], []
     n_p = n_k = 0
+    written = []            # 本次自动写入的格子 (row, col_idx)，只查这些有没有口径泄露
     for r in range(1, ws.max_row + 1):
         mv = ws.cell(r, cM).value
         if not mv:
@@ -1047,6 +1070,7 @@ def main():
                 cell = ws.cell(r, cP)
                 cell.value = clean
                 cell.alignment = Alignment(wrap_text=True, vertical='top')
+                written.append((r, cP))
                 n_p += 1
                 hits = [] if a.no_sanitize else scan_text(raw)
                 log.append({'row': r, 'model': ms, 'kind': '参数', 'source': src,
@@ -1063,6 +1087,7 @@ def main():
             total, parts_log, err = combo_total_price(op, ms, idx, rate_spec)
             if err is None:
                 ws.cell(r, cK).value = total
+                written.append((r, cK))
                 n_k += 1
                 log.append({'row': r, 'model': ms, 'kind': '价格',
                             'is_combo': is_combo(ms), 'parts': parts_log,
@@ -1075,11 +1100,11 @@ def main():
     # ---- 价格口径泄露闸门（保存前，不通过就不存）----
     # 折扣率、片区/总部口径、"×0.39" 这类东西只能写在回复里告诉用户，
     # 一旦落进表里、表又发给甲方，等于把底牌亮出去。宁可中断让人改。
-    leaks = scan_price_leak(ws, a.header_row)
+    leaks = scan_price_leak(ws, a.header_row, written)
     if leaks and not a.allow_price_note:
         bar = '━' * 64
         msg = ['', bar,
-               '🛑 中止保存：表里有价格计算口径（%d 处）' % len(leaks),
+               '🛑 中止保存：本次填入的内容里有价格计算口径（%d 处）' % len(leaks),
                bar,
                '这类内容只能出现在对话回复里，不能写进报价表：']
         for r, c, t in leaks[:15]:
@@ -1089,8 +1114,9 @@ def main():
         msg += [
             '',
             '怎么处理：',
-            '  · 把这些单元格里的折扣/成本说明删掉，只留最终单价、小计',
+            '  · 上面这几处是刚填进去的内容，把折扣/成本说明删掉，只留单价、小计',
             '  · 计算过程（折扣档、取整规则）写在回复里告诉用户',
+            '  · 只查自动写入的格子 —— 你原表自带的公式、汇总区、客户备注不会被拦',
             '  · 确实要给内部看的成本分析表，才加 --allow-price-note',
             bar, '']
         print('\n'.join(msg), file=sys.stderr)
@@ -1278,6 +1304,34 @@ def _selftest_combo():
               % (k, c, got, 'OK' if ok else '!! FAIL', why))
         if not ok:
             bad += 1
+
+    # 价格口径闸门：公式不得被当成折扣说明，真文本仍须拦
+    # （2026-10-27 实测：=125*0.03 里的 *0.03 被当成「×0.03」，把一张 10 行清单卡死）
+    print()
+    print('=== 价格口径闸门（公式 vs 文本）===')
+    try:
+        from openpyxl import Workbook as _WB
+        _wb = _WB(); _ws = _wb.active
+        _ws['A1'] = '序号'
+        _ws['I26'] = '=125*0.03'                     # ① 原表公式
+        _ws['J26'] = '单价按业务折扣后单价，折扣率0.34'  # ② 真·口径说明
+        leak_cases = [
+            ('只查公式格 I26', [(26, 9)], 0,
+             '公式是计算不是说明，误判会把带税率/系数的客户表卡死'),
+            ('只查文本格 J26', [(26, 10)], 1,
+             '真·折扣说明必须拦，否则报价表把底牌给甲方'),
+            ('同时查 I26+J26', [(26, 9), (26, 10)], 1,
+             '同一行里公式放行、文本照拦'),
+        ]
+        for name, cells, exp, why in leak_cases:
+            got = len(scan_price_leak(_ws, 1, cells))
+            ok = (got == exp)
+            print('  %-18s → 报 %d 处 %s（%s）'
+                  % (name, got, 'OK' if ok else '!! FAIL', why))
+            if not ok:
+                bad += 1
+    except ImportError:
+        print('  跳过：没装 openpyxl')
 
     print()
     print('自测结果：%s' % ('全部通过' if bad == 0 else '%d 项失败' % bad))

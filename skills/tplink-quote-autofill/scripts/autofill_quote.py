@@ -134,17 +134,103 @@ def make_by_class_spec(scope='项目机型'):
 #         'values': ['项目机型'], 'table': {'0.32': 0.27, '0.39': 0.34}}
 #   5) 项目机型按监控/非监控自动分档（片区/总部），表用内置换算表：
 #        make_by_class_spec()   ← 便捷构造器，等价于把上面两张表写进 spec
+#   6) 以该型号自己的业务折扣率为基底，再加减 N 个点（每型号折扣率不同，不能用固定值）：
+#        {'mode': 'by_field', 'field': 'seriesValue', 'values': ['项目机型'],
+#         'rate': {'from': 'business', 'offset': -0.02}}
+#        {'mode': 'from_business', 'offset': -0.02}          ← 不限系列，所有带 bd 的都算
+#
+#   上面第 3/4/5/6 条的 rate 都可以写成「表达式」：
+#        0.34                                          固定折扣率
+#        {'from': 'business', 'offset': -0.02}         业务折扣率 − 2 个点
+#        {'from': 'pq',       'offset': -0.02}         查片区表 − 2 个点
+#        {'from': 'hq',       'offset': -0.02}         查总部表 − 2 个点
+#        {'from': 'auto',     'offset': -0.02}         按型号自动分片区/总部 − 2 个点
 #
 # 未命中打折条件的型号 → 直接取标准价（面价）。
 NO_DISCOUNT = {'mode': 'none'}
+
+
+class PricingError(ValueError):
+    """口径能解析、但落到这一行算不出合法折扣率（如减点后 ≤ 0）。
+
+    与「型号没查到」一样处理：该行价格留空并说明，不按面价凑数。
+    """
+
+
+def _lookup_by_class(row, pq, hq, forced=None):
+    """按型号判断走片区表还是总部表，返回 (业务折扣率, 命中折扣率, 说明) 。"""
+    bd = str(row.get('businessDiscount') or '')
+    if not bd:
+        return None, None, '该型号无业务折扣率'
+    if forced == 'pq':
+        tbl, label = pq, '片区'
+    elif forced == 'hq':
+        tbl, label = hq, '总部'
+    else:
+        model = row.get('productModel')
+        tbl, label = (pq, '片区') if is_monitor_row(model) else (hq, '总部')
+    if bd in tbl:
+        return bd, tbl[bd], '%s %s→%s' % (label, bd, tbl[bd])
+    return bd, None, '业务折扣率 %s 不在%s表内' % (bd, label)
+
+
+def eval_rate(expr, row, spec=None):
+    """把口径表达式求值成 (折扣率 or None, 说明)。
+
+    expr 可以是：
+        None                          不打折、取基准价原样
+        数字                          固定折扣率
+        {'from':'business','offset':x} 该型号业务折扣率 + x
+        {'from':'pq'|'hq'|'auto','offset':x}
+                                      查片区/总部/自动分档表 + x
+    返回 None 表示不打折；算出的率越界则抛 PricingError。
+    """
+    if expr is None:
+        return None, '取基准价原样'
+    if isinstance(expr, bool):                      # 防 True/False 被当数字
+        raise ValueError('口径 rate 不能是布尔值')
+    if isinstance(expr, (int, float)):
+        return float(expr), '固定折扣率 %s' % expr
+    if not isinstance(expr, dict):
+        raise ValueError('口径 rate 写法不认识：%r' % (expr,))
+
+    src = str(expr.get('from') or '').strip().lower()
+    off = float(expr.get('offset') or 0)
+    spec = spec or {}
+
+    if src == 'business':
+        bd = row.get('businessDiscount')
+        if bd in (None, ''):
+            return None, '该型号无业务折扣率，取基准价原样'
+        base, label = float(bd), '业务折扣 %s' % bd
+    elif src in ('pq', 'hq', 'auto'):
+        pq = {str(k): float(v) for k, v in (spec.get('biz_to_pq') or BIZDISC_TO_PQ).items()}
+        hq = {str(k): float(v) for k, v in (spec.get('biz_to_hq') or BIZDISC_TO_HQ).items()}
+        bd, hit, label = _lookup_by_class(row, pq, hq, None if src == 'auto' else src)
+        if hit is None:
+            return None, label + '，取基准价原样'
+        base = float(hit)
+    else:
+        raise ValueError('口径 from 只支持 business / pq / hq / auto，收到 %r' % src)
+
+    rate = round(base + off, 6)
+    if off:
+        label = '%s %s %g个点 = %s' % (label, '+' if off > 0 else '-', abs(off) * 100, rate)
+    if rate <= 0:
+        raise PricingError('%s，折扣率 ≤ 0（口径写太低或该型号折扣率异常）' % label)
+    if rate > 3:
+        raise PricingError('%s，折扣率 > 3（口径写太高）' % label)
+    return rate, label
 
 
 def resolve_rate(spec, row):
     """按本次给的折扣口径，判断该型号该用哪个折扣率。
 
     row 是 CRM 返回的价格记录（含 price / businessDiscount / seriesValue）。
-    返回 (折扣率 or None, 说明)。
-    返回 None 表示**不打折，取标准价**。
+    返回 (折扣率 or None, 说明)。None 表示**不打折，取基准价原样**。
+
+    可以算不出来的情形（该型号无业务折扣率、折扣率越界）也返回 None 并说明，
+    但**越界会抛 PricingError** —— 那种情况宁可让这行价格留空，也不按面价凑数。
     """
     if not spec:
         raise ValueError('必须提供本次折扣口径 rate_spec（见 SKILL.md「折扣口径」章节）')
@@ -154,39 +240,167 @@ def resolve_rate(spec, row):
         return None, '本次口径：全部取标准价'
 
     if mode == 'flat':
-        return float(spec['rate']), '本次口径：统一折扣率 %s' % spec['rate']
+        return eval_rate(spec.get('rate'), row, spec)
+
+    if mode == 'dynamic':
+        # 全表一套动态口径（不分系列）：折扣率按每行自己的字段现算。
+        # 没有 businessDiscount 的行 → eval_rate 返回 None → 取基准价原样，不猜折扣。
+        return eval_rate(spec.get('rate'), row, spec)
+
+    if mode == 'from_business':
+        # 不限系列：凡是带 businessDiscount 的型号都按「自己的折扣率 ± offset」算。
+        # 渠道机没有这个字段 → 该行取基准价原样（不猜一个折扣给它）。
+        return eval_rate({'from': 'business', 'offset': spec.get('offset') or 0},
+                         row, spec)
 
     if mode in ('by_field', 'by_discount_table', 'by_class'):
         field = spec.get('field', 'seriesValue')
         values = [str(v).strip() for v in spec.get('values', [])]
         if str(row.get(field) or '').strip() not in values:
+            # 另一档口径（如「项目机型 vs 其余=渠道机」各给一套）：给了 else_rate 就用它，
+            # 没给则维持老行为 —— 不打折、取标准价。
+            other = spec.get('else_rate')
+            if other is not None:
+                return eval_rate(other, row, spec)
             return None, '不满足打折条件(%s=%s)，取标准价' % (
                 field, row.get(field))
 
         if mode == 'by_field':
-            return float(spec['rate']), '本次口径：%s∈%s 用折扣率 %s' % (
-                field, values, spec['rate'])
+            r = spec.get('rate')
+            if r is None:                       # 该档不打折：基准价原样
+                return None, '本次口径：%s∈%s 取基准价原样' % (field, values)
+            return eval_rate(r, row, spec)
 
-        # 以下两种都要用 businessDiscount 去查表
-        bd = str(row.get('businessDiscount') or '')
+        off = float(spec.get('offset') or 0)
 
         if mode == 'by_discount_table':
             table = {str(k): float(v)
                      for k, v in (spec.get('table') or {}).items()}
+            bd = str(row.get('businessDiscount') or '')
             if bd in table:
-                return table[bd], '本次口径：查表 %s→%s' % (bd, table[bd])
+                if not off:
+                    return table[bd], '本次口径：查表 %s→%s' % (bd, table[bd])
+                return _shift(table[bd], off, '查表 %s→%s' % (bd, table[bd]))
             return None, '业务折扣率 %s 不在本次对照表内，取标准价' % bd
 
-        # mode == 'by_class'：项目机型按监控/其他分片区/总部
-        model = row.get('productModel')
+        # mode == 'by_class'：项目机型按监控/其他分片区/总部（可用 class 强制指定）
         pq = {str(k): float(v) for k, v in (spec.get('biz_to_pq') or {}).items()}
         hq = {str(k): float(v) for k, v in (spec.get('biz_to_hq') or {}).items()}
-        tbl, label = (pq, '片区') if is_monitor_row(model) else (hq, '总部')
-        if bd in tbl:
-            return tbl[bd], '本次口径：%s类 %s→%s' % (label, bd, tbl[bd])
-        return None, '业务折扣率 %s 不在%s档表内，取标准价' % (bd, label)
+        bd, hit, label = _lookup_by_class(row, pq, hq, spec.get('class'))
+        if hit is None:
+            return None, label + '，取标准价'
+        if not off:
+            return hit, '本次口径：' + label
+        return _shift(hit, off, label)
 
     raise ValueError('未知的折扣口径 mode: %s' % mode)
+
+
+def _shift(base_rate, off, label):
+    """在已算出的折扣率上加减点，并做范围检查。"""
+    rate = round(float(base_rate) + float(off), 6)
+    shown = '%s %s %g个点 = %s' % (label, '+' if off > 0 else '-', abs(off) * 100, rate)
+    if rate <= 0:
+        raise PricingError('%s，折扣率 ≤ 0（口径写太低或该型号折扣率异常）' % shown)
+    if rate > 3:
+        raise PricingError('%s，折扣率 > 3（口径写太高）' % shown)
+    return rate, shown
+
+
+# CRM 一条价格记录里同时有三个价，渠道机和项目机的基准不是同一个，
+# 所以「折扣率」和「基准价」必须分开指定。
+BASE_FIELDS = {
+    'price':     ('price',          '标准价'),
+    'catalog':   ('catalogPrice',   '面价'),
+    'wholesale': ('wholesalePrice', '批发价'),
+}
+
+
+def resolve_base(spec, row):
+    """按本次口径选「用哪个价做基准」。返回 (字段名, 中文名, 说明)。
+
+    spec 里可以整体指定 base，也可以按分流结果给两套：
+        {'mode':'by_field','field':'seriesValue','values':['项目机型'],
+         'rate':0.36,'else_rate':1.05,
+         'hit':{'base':'price'},'else':{'base':'catalog'}}
+    没写 base → 用 price（标准价），与历史行为一致。
+    """
+    mode = spec.get('mode', 'none')
+    key = None
+    if mode in ('by_field', 'by_discount_table', 'by_class'):
+        field = spec.get('field', 'seriesValue')
+        values = [str(v).strip() for v in spec.get('values', [])]
+        hit = str(row.get(field) or '').strip() in values
+        node = spec.get('hit' if hit else 'else') or {}
+        key = node.get('base')
+        if key is None and hit:
+            key = spec.get('base')            # 老写法：顶层 base 只作用于命中档
+        if key is None and not hit:
+            key = spec.get('else_base')
+    if key is None:
+        key = spec.get('base') or 'price'
+
+    fld, label = BASE_FIELDS.get(str(key).strip().lower(), BASE_FIELDS['price'])
+    return fld, label, '基准价=%s' % label
+
+
+def describe_rate_expr(expr):
+    """把一个口径表达式翻成人话（不带基准价）。"""
+    if expr is None:
+        return '原样'
+    if isinstance(expr, (int, float)):
+        return '×%g' % float(expr)
+    if not isinstance(expr, dict):
+        return str(expr)
+    src = str(expr.get('from') or '').strip().lower()
+    off = float(expr.get('offset') or 0)
+    tag = {'business': '各自业务折扣率',
+           'pq': '片区表折扣率',
+           'hq': '总部表折扣率',
+           'auto': '按型号分片区/总部后的折扣率'}.get(src, src or '?')
+    if not off:
+        return tag
+    return '%s %s%g个点' % (tag, '+' if off > 0 else '-', abs(off) * 100)
+
+
+def describe_spec(spec):
+    """把 rate_spec 翻成人话 —— 日志和结果页都会打，JSON 只有写代码的人看得懂。"""
+    _cn = {'price': '标准价', 'catalog': '目录价', 'wholesale': '批发价'}
+
+    def b(k):
+        return _cn.get(str(k or 'price').strip().lower(), '标准价')
+
+    def one(r, base):
+        return '%s × %s' % (base, r) if isinstance(r, (int, float)) \
+            else ('%s 原样' % base if r is None else '%s × %s' % (base, describe_rate_expr(r)))
+
+    mode = spec.get('mode', 'none')
+    if mode == 'none':
+        return '全部取标准价，不打折'
+    if mode == 'flat':
+        return '全表统一：' + one(spec.get('rate'), b(spec.get('base') or spec.get('else_base')))
+    if mode == 'dynamic':
+        return '全表统一：%s × %s（无业务折扣率的型号 → 原样）' % (
+            b(spec.get('base')), describe_rate_expr(spec.get('rate')))
+    if mode == 'from_business':
+        return '所有带业务折扣率的型号：基准价 × %s（渠道机无业务折扣率 → 原样）' % \
+            describe_rate_expr({'from': 'business', 'offset': spec.get('offset') or 0})
+    if mode == 'by_field':
+        hit, alt = spec.get('hit') or {}, spec.get('else') or {}
+        return '按 %s 分两档：%s → %s；其余 → %s' % (
+            spec.get('field', 'seriesValue'),
+            '/'.join(spec.get('values') or []) or '(未指定)',
+            one(spec.get('rate'), b(hit.get('base') or spec.get('base'))),
+            one(spec.get('else_rate'), b(alt.get('base') or spec.get('else_base'))))
+    if mode in ('by_discount_table', 'by_class'):
+        force = spec.get('class')
+        what = {'pq': '片区表', 'hq': '总部表'}.get(force, '片区/总部表按型号自动分')
+        off = float(spec.get('offset') or 0)
+        tail = '' if not off else '，再 %s%g个点' % ('+' if off > 0 else '-', abs(off) * 100)
+        return '按 %s 判定 %s 后查%s%s' % (
+            spec.get('field', 'seriesValue'),
+            '/'.join(spec.get('values') or []) or '(未指定)', what, tail)
+    return '未知口径 mode=%s' % mode
 
 # 表格里出现的"非型号备注"，遇到就跳过不动
 SKIP_NOTES = ('没有防爆球机', '没有65寸', '相关产品已停产', '无', '-', '/', '停产')
@@ -326,8 +540,9 @@ def combo_unit_price(op, model, kb_idx=None, rate_spec=None):
     返回 (单价, 依据说明)。无 CRM 记录时返回 (None, 原因)。
 
     **折扣口径由调用方通过 rate_spec 传入**（用户本次指定），本函数不预设任何折扣规则：
-      · resolve_rate 返回折扣率 → 标准价 × 折扣率，向上取整到个位 0/2/5
-      · 返回 None → 直接取标准价（面价），原样保留小数
+      · resolve_rate 返回折扣率 → 基准价 × 折扣率，向上取整到个位 0/2/5
+      · 返回 None → 直接取基准价，原样保留小数
+    基准价由 resolve_base 决定（标准价 / 面价 / 批发价），渠道机和项目机可以各用各的。
     """
     ex = crm_price(op, model)
     if not ex:
@@ -342,15 +557,29 @@ def combo_unit_price(op, model, kb_idx=None, rate_spec=None):
     elif len(ex) > 1:
         return None, 'CRM 命中 %d 条同型号记录(valid=%d)，需人工确认取哪条' % (len(ex), len(val))
     x = ex[0]
-    price = x.get('price')
 
-    rate, basis = resolve_rate(rate_spec, x)
+    base_fld, base_label, _ = resolve_base(rate_spec, x)
+    price = x.get(base_fld)
+    if price in (None, ''):
+        # 该条记录没有这个价（部分型号无批发价/面价）→ 回退标准价，并在说明里点出来
+        if base_fld != 'price' and x.get('price') not in (None, ''):
+            price = x.get('price')
+            base_label = '标准价（该型号无%s）' % base_label
+        else:
+            return None, 'CRM 记录缺%s（%s），无法算价' % (base_label, base_fld)
+
+    try:
+        rate, basis = resolve_rate(rate_spec, x)
+    except PricingError as e:
+        # 口径本身没写错，但落到这行算不出合法折扣率（如业务折扣 0.32 减 40 个点）。
+        # 宁可这行价格留空并说明，也不按面价凑一个数出来。
+        return None, '价格留空：%s' % e
     if rate is None:
         unit = clean_price(price, rounded_up=False)
-        return unit, '标准价 %s（%s）' % (price, basis)
+        return unit, '%s %s（%s）' % (base_label, price, basis)
 
     unit = clean_price(float(price) * rate, rounded_up=True)
-    return unit, '%s × %s = %s（%s）' % (price, rate, unit, basis)
+    return unit, '%s %s × %s = %s（%s）' % (base_label, price, rate, unit, basis)
 
 
 def combo_total_price(op, models_str, kb_idx=None, rate_spec=None):
@@ -372,6 +601,46 @@ def combo_total_price(op, models_str, kb_idx=None, rate_spec=None):
 
 
 # ------------------------------------------------------------------ CRM
+def resolve_crm_creds(email=None, password=None):
+    """找 CRM 凭据：命令行参数 → 配置文件 crm 段 → ~/.workbuddy/MEMORY.md。
+
+    返回 (email, pwd)，可能都是 None（三处都没有）。
+    抽成函数是因为 one_query.py 也要用同一套规则 —— 凭据来源只留一份，
+    别让两个脚本各记一套"配置里没有就去哪找"。
+    """
+    email = (email or '').strip() or None
+    pwd = (password or '').strip() or None
+    # 环境变量优先于配置文件：网页版按"每个人自己的 CRM 账号"跑，
+    # 用环境变量传，密码就不会出现在进程命令行里（argv 全机可见）。
+    if not email:
+        email = (os.environ.get('TPKIT_CRM_EMAIL') or '').strip() or None
+    if not pwd:
+        pwd = (os.environ.get('TPKIT_CRM_PASSWORD') or '').strip() or None
+    if not email or not pwd:
+        try:
+            _ce, _cp = cfg.crm_creds()
+        except Exception:
+            _ce = _cp = ''
+        email = email or (_ce or None)
+        pwd = pwd or (_cp or None)
+    if not email or not pwd:
+        mem = os.path.expanduser('~/.workbuddy/MEMORY.md')
+        if os.path.exists(mem):
+            t = open(mem, encoding='utf-8', errors='replace').read()
+            if not email:
+                m = re.search(r'[\w\.\-]+@[\w\.\-]+\.\w+', t)
+                if m:
+                    email = m.group(0)
+            if not pwd:
+                # 匹配：**密码**：`xxx`  或  - 密码: xxx
+                m = re.search(r'密码\**\s*[：:]\s*`([^`\n]+)`', t)
+                if not m:
+                    m = re.search(r'密码\**\s*[：:]\s*([^\s`\n]+)', t)
+                if m:
+                    pwd = m.group(1).strip()
+    return email, pwd
+
+
 def crm_login(email, pwd):
     import urllib.request, urllib.parse, http.cookiejar
     from urllib.request import getproxies
@@ -708,29 +977,13 @@ def main():
               '"biz_to_hq":{"0.32":0.25,"0.39":0.32}}\'')
         print('  本次先按「全部取标准价」继续；如需折扣请带 --rate-spec 重跑。')
         print()
-    print('折扣口径:', json.dumps(rate_spec, ensure_ascii=False))
+    print('折扣口径:', describe_spec(rate_spec))
+    print('            ', json.dumps(rate_spec, ensure_ascii=False))
 
     # ---- CRM ----
     op = None
     if not a.no_crm:
-        email, pwd = a.email, a.password
-        if not email or not pwd:                  # 其次读配置文件里的 crm 段
-            _ce, _cp = cfg.crm_creds()
-            email = email or _ce or None
-            pwd = pwd or _cp or None
-        if not email or not pwd:
-            mem = os.path.expanduser('~/.workbuddy/MEMORY.md')
-            if os.path.exists(mem):
-                t = open(mem, encoding='utf-8', errors='replace').read()
-                if not email:
-                    m = re.search(r'[\w\.\-]+@[\w\.\-]+\.\w+', t)
-                    if m: email = m.group(0)
-                if not pwd:
-                    # 匹配：**密码**：`xxx`  或  - 密码: xxx
-                    m = re.search(r'密码\**\s*[：:]\s*`([^`\n]+)`', t)
-                    if not m:
-                        m = re.search(r'密码\**\s*[：:]\s*([^\s`\n]+)', t)
-                    if m: pwd = m.group(1).strip()
+        email, pwd = resolve_crm_creds(a.email, a.password)
         if email and pwd:
             try:
                 op, info = crm_login(email, pwd)

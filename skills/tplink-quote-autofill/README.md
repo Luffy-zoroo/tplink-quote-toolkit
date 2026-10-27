@@ -133,10 +133,37 @@ CRM 里每个型号带一个**业务折扣率**（`businessDiscount`）。由它
 | 项目机型统一走片区 0.34 | `{"mode":"by_field","field":"seriesValue","values":["项目机型"],"rate":0.34}` |
 | 项目机型按类别自动分片区/总部 | `{"mode":"by_class","field":"seriesValue","values":["项目机型"],"biz_to_pq":{"0.32":0.27,"0.39":0.34},"biz_to_hq":{"0.32":0.25,"0.39":0.32}}` |
 | 按你当次给的对照表折算 | `{"mode":"by_discount_table","field":"seriesValue","values":["项目机型"],"table":{"0.32":0.27,"0.39":0.34}}` |
+| **两档分开：项目机一个口径、渠道机另一个** | `{"mode":"by_field","field":"seriesValue","values":["项目机型"],"rate":0.36,"else_rate":0.95,"hit":{"base":"price"},"else":{"base":"catalog"}}` |
+| **跟着型号走：各自业务折扣率 −2 点** | `{"mode":"from_business","offset":-0.02,"base":"price"}` |
+| 两档里一档跟着型号走 | `{"mode":"by_field","field":"seriesValue","values":["项目机型"],"rate":{"from":"business","offset":-0.02},"else_rate":null}` |
+| 查片区表换成片区折扣率，再 −2 点 | `{"mode":"by_class","field":"seriesValue","values":["项目机型"],"class":"pq","offset":-0.02}` |
 
 - **不传 `--rate-spec`** → 脚本不猜，打印提示后先按「全部取标准价」跑，提醒你带参数重跑。
 - 同一份清单：`by_class` 口径下行12=1616（走总部），`by_field 0.34` 口径下=1717（走片区）。
   口径不同结果不同，脚本不替你决定。
+
+**`rate` 可以写表达式**（折扣率不能写死的时候）：
+
+| 表达式 | 等于 |
+|---|---|
+| `0.34` | 固定折扣率（等价老写法） |
+| `{"from":"business","offset":-0.02}` | 该型号业务折扣率 − 2 个点 |
+| `{"from":"pq","offset":-0.02}` | 查片区表换成片区折扣率，再 − 2 个点 |
+| `{"from":"hq","offset":-0.02}` | 查总部表换成总部折扣率，再 − 2 个点 |
+| `{"from":"auto","offset":-0.02}` | 监控类走片区表、其余走总部表，再 − 2 个点 |
+
+- **什么时候必须用表达式**：项目机型的业务折扣率每个型号不一样，写死 `0.34` 会整片算错
+- 算出来折扣率 ≤ 0 或 > 3 → 该行**价格留空**并说明（`PricingError`），不按面价凑数
+- 没有 `businessDiscount` 的行遇到 `from: business` → 基准价原样，不猜折扣
+
+**两档口径（项目机 / 渠道机）怎么用**：渠道机和项目机不是一套定价逻辑，
+清单里两种货混着时必须分开设，别拿一个口径套全表。
+
+- `rate` = 命中档（项目机型）的折扣率，`else_rate` = 另一档（渠道机）的折扣率
+- 任一写 `null` = 该档不打折，**基准价原样不取整**
+- `hit` / `else` 里的 `base` 选基准价：`price`（标准价，默认）/ `catalog`（目录价）/ `wholesale`（批发价）
+- 两档完全一样时可以退回 `{"mode":"flat","rate":…,"base":…}`，不依赖 `seriesValue`
+- ⚠️ `seriesValue` 要查 CRM 才有，所以 `--no-crm`（只填参数）时两档口径都不生效
 
 ### 3. CRM 里取哪些数（这部分是稳定的）
 

@@ -51,10 +51,13 @@ STATE_FILE = os.path.join(BASE_DIR, "state", "flow_state.json")
 FEEDBACK_DIR = os.path.join(BASE_DIR, "feedback")
 
 # 流程顺序（autofill = 参数+价格一次跑完，排在最后）
-ORDER = ['select', 'params', 'price', 'autofill']
+# eol（停产核验）单独成段：放在选型之后、参数之前 ——
+# 型号是废的，参数和价格填得再对也没用（2026-10-27 用户定调「停产肯定不能填进去」）。
+ORDER = ['select', 'eol', 'params', 'price', 'autofill']
 
 LABEL = {
     'select':   '选型',
+    'eol':      '停产核验',
     'params':   '参数列',
     'price':    '价格列',
     'autofill': '参数 + 价格',
@@ -66,7 +69,12 @@ QUESTIONS = {
         '这版选型有没有要调整的？型号、数量、档次都可以改。',
         '  · 该用渠道机 / 项目机 / 域联机，有没有搞错档次',
         '  · 数量按清单原样，还是按系统实际点位数',
-        '  · 有没有已停产、或即将停产的型号要替换',
+    ],
+    'eol': [
+        '停产核验这一版，有没有要处理的？',
+        '  · 已停产（HALT）的型号换成哪个替代款 —— 这个必须你定，我不替你选',
+        '  · 停产预警（HALT_WARNING）的要不要提前换掉（项目周期长更要换）',
+        '  · 有没有 CRM 里查不到、要人工确认真死没死的型号',
     ],
     'params': [
         '参数这版有没有要改的？',
@@ -93,6 +101,7 @@ QUESTIONS = {
 # 反馈建议改哪里（帮作者快速定位，也让提反馈的人知道该看哪节）
 WHERE = {
     'select':   'SKILL.md「🧭 选型阶段」/「选型取数」',
+    'eol':      'SKILL.md「🚨 停产核验」',
     'params':   'SKILL.md「📝 参数来源与写法」/「品牌词中性化」',
     'price':    'SKILL.md「💴 定价默认策略」',
     'autofill': 'SKILL.md「📝 参数来源与写法」或「💴 定价默认策略」',

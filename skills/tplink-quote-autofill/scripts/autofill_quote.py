@@ -544,7 +544,7 @@ def combo_unit_price(op, model, kb_idx=None, rate_spec=None):
       · 返回 None → 直接取基准价，原样保留小数
     基准价由 resolve_base 决定（标准价 / 面价 / 批发价），渠道机和项目机可以各用各的。
     """
-    ex = crm_price(op, model)
+    ex = crm_price_cached(op, model)
     if not ex:
         return None, 'CRM 未查到该型号'
     # 同一型号返回多条，通常是该物料**历年阶梯价（ladderPrice）的历史档**，
@@ -557,6 +557,11 @@ def combo_unit_price(op, model, kb_idx=None, rate_spec=None):
     elif len(ex) > 1:
         return None, 'CRM 命中 %d 条同型号记录(valid=%d)，需人工确认取哪条' % (len(ex), len(val))
     x = ex[0]
+    # 第二道防线：停产（HALT）不给价。
+    # 正常路径上主循环已按 check_lifecycle 拦掉，这里兜住绕过主循环的调用
+    # （one_query.py 等直接调本函数）—— 宁可返回原因，也不给出一个"算得对的错价格"。
+    if lc_is_halt(lc_of(x)):
+        return None, '已停产（HALT），不出价，需换在产型号'
 
     base_fld, base_label, _ = resolve_base(rate_spec, x)
     price = x.get(base_fld)
@@ -684,6 +689,123 @@ def crm_price(op, model):
             if str(x.get('productModel', '')).strip().upper().startswith(mu)
             and _boundary_ok(str(x.get('productModel', '')).strip().upper(), mu)]
     return near if len(near) == 1 else []
+
+
+# ------------------------------------------------------------------ 在产状态
+# 实测 2026-10-27：CRM `lifeCycle` 全量取值只有三种，所以判据是**白名单**——
+# 只有 PRODUCTION 放行，其余分两档处理。别改成"黑名单只拦 HALT"，
+# 将来 CRM 新增状态（EOL / EOP 之类）会静默漏过去。
+LC_LIVE = 'PRODUCTION'      # 在产
+LC_HALT = 'HALT'            # 已停产 → 参数价格都不填
+LC_WARN = 'HALT_WARNING'    # 停产预警 → 填，但必须告警
+
+
+def lc_of(row):
+    """取一条 CRM 记录的 lifeCycle，统一大写去空格。"""
+    return str((row or {}).get('lifeCycle') or '').strip().upper()
+
+
+def lc_is_halt(lc):
+    """已停产：不能填进报价表。"""
+    return str(lc or '').strip().upper() == LC_HALT
+
+
+def lc_is_warn(lc):
+    """停产预警：目前还能买，但要让用户知道（长周期项目更要提醒）。"""
+    return str(lc or '').strip().upper() == LC_WARN
+
+
+def lc_blocked(lc):
+    """是否**不可直接报**（含停产与预警）。空值一律放行 —— 字段缺失不等于停产。"""
+    v = str(lc or '').strip().upper()
+    return bool(v) and v != LC_LIVE
+
+
+def halt_stem(model):
+    """取型号的字母主干，用于找同系列在产候选。
+
+    `TL-VE46U-L` → `TL-VE`、`TL-EN4266G` → `TL-EN`。
+    为什么不用"去掉最后一段"：`TL-SDC6012S` 去掉后缀只剩 `TL-SDC6012`，
+    替代款 `TL-SDC6016F-6I` 数字完全不同，按精确前缀找不到；退到字母主干才能捞出来。
+    """
+    m = re.match(r'^(TL-[A-Za-z]+)', str(model or '').strip().upper())
+    return m.group(1) if m else ''
+
+
+_PRICE_CACHE = {}
+
+
+def crm_price_cached(op, model):
+    """crm_price 的缓存版：一次运行内同一型号只查一次。
+
+    停产预检要按型号查一遍 lifeCycle，填价格时同一型号还要再查一遍；
+    不缓存等于 CRM 请求翻倍（实测约 0.3s/次，50 行的单子多花 15 秒）。
+    """
+    k = str(model or '').strip().upper()
+    if k not in _PRICE_CACHE:
+        _PRICE_CACHE[k] = crm_price(op, model)
+    return _PRICE_CACHE[k]
+
+
+def check_lifecycle(op, models):
+    """预检在产状态，返回 {大写型号: {model, lifeCycle, name, price}}。
+
+    只收**不可直接报**的（HALT / HALT_WARNING），在产的不进结果。
+    CRM 查不到的也不进 —— 那是"未查到该型号"，由原有逻辑报，别混成停产。
+
+    为什么要单独预检而不是在填表时顺手判：
+    参数填充和价格填充是两段独立代码，各自都不看 lifeCycle。停产型号**照样能
+    查到价**（清仓价/历史价），产出表看起来完全正常（参数带★、小计算得出），
+    型号却是废的 —— 这是最危险的一种静默失败。
+    """
+    out = {}
+    for m in models:
+        s = str(m or '').strip()
+        if not s:
+            continue
+        k = s.upper()
+        if k in out:
+            continue
+        for x in crm_price_cached(op, s):
+            lc = lc_of(x)
+            if lc_blocked(lc):
+                out[k] = {'model': str(x.get('productModel') or s).strip(),
+                          'lifeCycle': lc,
+                          'name': str(x.get('productName') or '').strip(),
+                          'price': x.get('price')}
+                break
+    return out
+
+
+def suggest_alternatives(op, model, limit=6):
+    """停产后找**在产候选线索**，按型号相似度排序。找不到就返回 []。
+
+    只给线索，**绝不自动替换**：替代款会连参数、档次、价格全变，
+    必须人拍板（2026-10-27 用户口径：找不到替代款就让用户指定）。
+    """
+    stem = halt_stem(model)
+    if not stem:
+        return []
+    import urllib.parse
+    import difflib
+    p = urllib.parse.urlencode({'productModel': stem, 'start': 0, 'limit': 500})
+    try:
+        j = json.loads(op.open(crm_api() + '/line/findByPage?' + p,
+                              timeout=60).read().decode('utf-8'))
+    except Exception:
+        return []
+    mu = str(model or '').strip().upper()
+    seen, cand = set(), []
+    for x in (j.get('results') or []):
+        if lc_of(x) != LC_LIVE:
+            continue
+        pm = str(x.get('productModel') or '').strip()
+        if not pm or pm.upper() == mu or pm.upper() in seen:
+            continue
+        seen.add(pm.upper())
+        cand.append(pm)
+    cand.sort(key=lambda s: -difflib.SequenceMatcher(None, mu, s.upper()).ratio())
+    return cand[:limit]
 
 
 # ------------------------------------------------------------------ 控标库
@@ -894,6 +1016,12 @@ def main():
     ap.add_argument('--allow-price-note', action='store_true',
                     help='允许表里带价格口径词（仅用于内部成本分析表；'
                          '对外报价表**不要加**，会把折扣亮给甲方）')
+    ap.add_argument('--no-lifecycle', action='store_true',
+                    help='跳过停产核验（**不推荐**：停产型号会照常填参数和价格，'
+                         '报出去就是废型号。只在明确知道型号仍在产、只是 CRM 没刷时用）')
+    ap.add_argument('--halt-strict', action='store_true',
+                    help='只要出现已停产（HALT）就以退出码 5 失败（批处理/CI 用；'
+                         '默认是「其他行照填、停产行留空」并在报告里喊出来）')
     a = ap.parse_args()
 
     # ---- 交付门禁：上一段没确认，不许开工 ----
@@ -1027,16 +1155,80 @@ def main():
         shutil.copy2(a.xlsx, bak)
         print('备份 ->', bak)
 
+    # ---- 停产预检（在产状态不查，后面全是白填）----
+    # 用户 2026-10-27 定调：**停产型号肯定不能填进去，都要复核；
+    # 找不到替代款就让用户指定替代款。** 所以这是硬拦截，不是提示。
+    #
+    # 必须先做一遍再填，原因：参数和价格是两段独立代码、都不看 lifeCycle，
+    # 停产型号照样查得到价（清仓价/历史价）→ 产出表完全正常，型号却是废的。
+    halt_map = {}
+    if op is not None and not a.no_lifecycle:
+        _seen_models, _seen_up = [], set()
+        # 从表头下一行开始：表头里的「型号」两个字会被 parse_combo 当成一个型号，
+        # 白查一次 CRM（第一版就踩到了，4 行的表报「5 个型号」）。
+        for _r in range(a.header_row + 1, ws.max_row + 1):
+            _mv = ws.cell(_r, cM).value
+            if not _mv:
+                continue
+            _s = str(_mv).strip()
+            if _s in SKIP_NOTES:
+                continue
+            for _pm, _q in parse_combo(_s):
+                _u = str(_pm or '').strip().upper()
+                if _u and _u not in _seen_up:      # 同一型号出现多次只查一次
+                    _seen_up.add(_u)
+                    _seen_models.append(_pm)
+        print()
+        print('停产核验: 查 CRM lifeCycle（%d 个型号）…' % len(_seen_models))
+        halt_map = check_lifecycle(op, _seen_models)
+        n_halt = sum(1 for v in halt_map.values() if lc_is_halt(v['lifeCycle']))
+        n_warn = len(halt_map) - n_halt
+        if halt_map:
+            print('  ⛔ 已停产 %d 个 ／ ⚠ 停产预警 %d 个' % (n_halt, n_warn))
+        else:
+            print('  ✅ 全部在产')
+    elif a.no_lifecycle:
+        print()
+        print('⚠ 已加 --no-lifecycle：**跳过停产核验**。')
+        print('  停产型号会照常填参数和价格，报出去就是废型号。只在明确知道自己在做什么时用。')
+
     # ---- 逐行处理 ----
     log, rows = [], []
     n_p = n_k = 0
     written = []            # 本次自动写入的格子 (row, col_idx)，只查这些有没有口径泄露
+    n_halt_skip = 0         # 因停产被整行跳过的数量
     for r in range(1, ws.max_row + 1):
         mv = ws.cell(r, cM).value
         if not mv:
             continue
         ms = str(mv).strip()
         if ms in SKIP_NOTES:
+            continue
+
+        # ---------- 停产拦截：整行不填，参数和价格都留空 ----------
+        # 只拦 HALT。HALT_WARNING 还能买，照填但要告警（见价格段之后的记录）。
+        h_halt = h_warn = None
+        for pm, _q in parse_combo(ms):
+            h = halt_map.get(pm.upper())
+            if not h:
+                continue
+            if lc_is_halt(h['lifeCycle']):
+                h_halt = h
+                break
+            h_warn = h_warn or h
+        if h_halt:
+            alts = suggest_alternatives(op, h_halt['model']) if op is not None else []
+            # 原表这两个格子如果已经有内容（客户自己填的），**不动它** ——
+            # 我们的职责是不往里加东西，不是改客户的原表。
+            had = any(ws.cell(r, c).value not in (None, '', 0) for c in (cP, cK))
+            log.append({'row': r, 'model': ms, 'kind': '停产',
+                        'lifeCycle': h_halt['lifeCycle'],
+                        'halt_model': h_halt['model'],
+                        'product_name': h_halt['name'],
+                        'alts': alts, 'had_value': had,
+                        'note': '已停产 HALT：未填参数与价格'
+                                + ('（该行原有内容未改动）' if had else '')})
+            n_halt_skip += 1
             continue
 
         # 型号候选（拆 A/B、A+B、*N 数量）
@@ -1097,6 +1289,56 @@ def main():
                             'is_combo': is_combo(ms), 'parts': parts_log,
                             'note': err})
 
+        # ---------- 停产预警记录：照填，但必须让人知道 ----------
+        # HALT_WARNING 是「目前还能买、即将停产」，卡死不合适；但投标项目周期长，
+        # 现在能交不代表项目交付时还能交货，所以一定要露在报告里。
+        if h_warn:
+            log.append({'row': r, 'model': ms, 'kind': '停产预警',
+                        'lifeCycle': h_warn['lifeCycle'],
+                        'halt_model': h_warn['model'],
+                        'product_name': h_warn['name'],
+                        'note': 'HALT_WARNING：目前还能买，但已列入停产预警'})
+
+    # ---- 停产与预警汇总（在保存之前喊，别让人先看到"已保存"再发现型号是废的）----
+    halts = [e for e in log if e.get('kind') == '停产']
+    hwarns = [e for e in log if e.get('kind') == '停产预警']
+    if halts or hwarns:
+        bar = '━' * 64
+        print()
+        print(bar)
+        if halts:
+            print('⛔ %d 行型号已停产（HALT）→ 参数和价格都**没有填**' % len(halts))
+            print(bar)
+            for e in halts:
+                print('  第 %-4s 行  %-28s %s'
+                      % (e['row'], (e['model'] or '')[:28], e.get('product_name') or ''))
+                alts = e.get('alts') or []
+                if alts:
+                    print('       在产候选（按型号相似度排，**只是线索**，要人确认）：')
+                    for i in range(0, len(alts), 3):
+                        print('         ' + '   '.join(alts[i:i + 3]))
+                else:
+                    print('       ⚠ 同系列没找到在产型号 → **请指定替代款**')
+                if e.get('had_value'):
+                    print('       （该行原表已有内容，未改动；请确认那个型号是不是也该换）')
+        if hwarns:
+            if halts:
+                print()
+            print('⚠ %d 行是停产预警（HALT_WARNING）：目前还能买，已填参数和价格' % len(hwarns))
+            print(bar)
+            for e in hwarns:
+                print('  第 %-4s 行  %-28s %s'
+                      % (e['row'], (e['model'] or '')[:28], e.get('product_name') or ''))
+            print('  长周期项目要留意：现在能交不代表项目交付时还能交货。')
+        print(bar)
+        if halts:
+            print('下一步：把上面每个停产型号换成在产款（或让用户指定），再重跑本脚本。')
+            print('  批处理里希望有停产就判失败：--halt-strict')
+        print()
+        if halts and a.halt_strict:
+            print('已按 --halt-strict 退出（退出码 5）。', file=sys.stderr)
+            sys.exit(5)
+
     # ---- 价格口径泄露闸门（保存前，不通过就不存）----
     # 折扣率、片区/总部口径、"×0.39" 这类东西只能写在回复里告诉用户，
     # 一旦落进表里、表又发给甲方，等于把底牌亮出去。宁可中断让人改。
@@ -1126,7 +1368,8 @@ def main():
     target = a.out or a.xlsx
     wb.save(target)
     print('\n已保存: %s' % target)
-    print('填参数 %d 行，填价格 %d 行' % (n_p, n_k))
+    print('填参数 %d 行，填价格 %d 行%s'
+          % (n_p, n_k, ('，跳过停产 %d 行' % n_halt_skip) if n_halt_skip else ''))
 
     if a.report:
         json.dump(log, open(a.report, 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
@@ -1332,6 +1575,53 @@ def _selftest_combo():
                 bad += 1
     except ImportError:
         print('  跳过：没装 openpyxl')
+
+    # === 停产判据断言（不联网）===
+    # 2026-10-27 用户定调：停产型号肯定不能填进去，都要复核。
+    # 这条判据写宽了就会把正常型号挡在门外（像价格闸门把公式当折扣那样），
+    # 写窄了会让停产型号溜进报价表 —— 两个方向都得锁。
+    print()
+    print('=== 停产判据（lifeCycle）===')
+    lc_cases = [
+        ('PRODUCTION', False, False, '在产 → 必须放行'),
+        ('production', False, False, '大小写不敏感'),
+        ('HALT', True, False, '已停产 → 必须拦'),
+        (' halt ', True, False, '带空格也要认出来'),
+        ('HALT_WARNING', False, True, '停产预警 → 不算停产、但要告警'),
+        ('', False, False, '空值放行：字段缺失不等于停产'),
+        (None, False, False, 'None 放行：不能把缺数据当停产'),
+    ]
+    for v, exp_h, exp_w, why in lc_cases:
+        gh, gw = lc_is_halt(v), lc_is_warn(v)
+        ok = (gh == exp_h and gw == exp_w)
+        print('  %-14r halt=%-5s warn=%-5s %s（%s）'
+              % (v, gh, gw, 'OK' if ok else '!! FAIL', why))
+        if not ok:
+            bad += 1
+    # 白名单原则：将来 CRM 新增状态（EOL/EOP…）不能静默放行
+    ok = lc_blocked('EOL') and not lc_is_halt('EOL')
+    print('  %-14s blocked=%-5s halt=%-5s %s（新状态走预警档，不静默放行）'
+          % ('EOL(假设)', lc_blocked('EOL'), lc_is_halt('EOL'), 'OK' if ok else '!! FAIL'))
+    if not ok:
+        bad += 1
+
+    print()
+    print('=== 替代款主干提取（halt_stem）===')
+    stem_cases = [
+        ('TL-VE46U-L', 'TL-VE', '去掉数字段，退到字母主干才能捞出同系列在产款'),
+        ('TL-SDC6012S', 'TL-SDC', '替代款 TL-SDC6016F-6I 数字完全不同，精确前缀找不到'),
+        ('TL-EN4266G', 'TL-EN', '机柜系列'),
+        ('TL-NVS7362-256', 'TL-NVS', '带盘位后缀'),
+        ('TL-IPC445FP-W4', 'TL-IPC', '摄像机'),
+        ('XAP-123', '', '不是 TL- 开头 → 返回空，不乱猜'),
+    ]
+    for m, exp, why in stem_cases:
+        got = halt_stem(m)
+        ok = (got == exp)
+        print('  %-20s → %-10s %s（%s）'
+              % (m, got or "''", 'OK' if ok else '!! FAIL', why))
+        if not ok:
+            bad += 1
 
     print()
     print('自测结果：%s' % ('全部通过' if bad == 0 else '%d 项失败' % bad))

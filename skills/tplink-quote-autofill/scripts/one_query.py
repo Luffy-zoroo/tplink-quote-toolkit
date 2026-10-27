@@ -60,7 +60,10 @@ def query_one(model, idx, op, why=''):
     out = {'model': model, 'product_model': None, 'name': '', 'series': '',
            'src': None, 'src_kind': None, 'url': None, 'params': [],
            'price': None, 'bd': None,
-           'pq': None, 'hq': None, 'cands': 0, 'notes': []}
+           'pq': None, 'hq': None, 'cands': 0, 'notes': [],
+           # 在产状态（2026-10-27 新增）：停产型号不能填进报价表，
+           # 查询页必须**一眼看出来**，不能让价格掩盖了这个事实。
+           'life': None, 'alts': []}
 
     # ---------------- 参数 ----------------
     ent = A.kb_lookup(idx, [model]) if idx else None
@@ -91,6 +94,7 @@ def query_one(model, idx, op, why=''):
         # 不能笼统说"没连 CRM"，否则用户会以为是自己没勾。
         out['notes'].append(('价格没查成：%s' % why) if why
                             else '这次没勾「算价格」，只出了参数')
+        out['notes'].append('没连 CRM，**在产状态也没核** —— 投产前要单独确认这个型号还在产')
         return out
 
     rows = A.crm_price(op, model)
@@ -98,6 +102,14 @@ def query_one(model, idx, op, why=''):
     out['cands'] = n
     if not rec:
         out['notes'].append('CRM 里没查到这个型号的价格（可能已下架或型号写法不同）')
+        # 查不到价时也试着判在产状态：停产型号常常连价都没了，
+        # 但「停产」和「型号写错」是两回事，得分得清。
+        prov = A.check_lifecycle(op, [model]).get(model.upper())
+        if prov:
+            out['life'] = prov['lifeCycle']
+            if A.lc_is_halt(prov['lifeCycle']):
+                out['notes'].append('⛔ 这个型号已停产（HALT）—— 不是写错，是确实没在产了')
+                out['alts'] = A.suggest_alternatives(op, model)
         return out
 
     out['product_model'] = rec.get('productModel') or model
@@ -105,6 +117,18 @@ def query_one(model, idx, op, why=''):
     out['series'] = rec.get('seriesValue') or ''
     out['price'] = rec.get('price')
     out['bd'] = rec.get('businessDiscount')
+    out['life'] = A.lc_of(rec)
+
+    # ---- 在产状态（停产优先说，别让价格把这事盖过去）----
+    if A.lc_is_halt(out['life']):
+        out['alts'] = A.suggest_alternatives(op, model)
+        out['notes'].insert(0, '⛔ 这个型号已停产（HALT）—— **不能填进报价表**，'
+                               '下面这个价只是 CRM 里的历史价/清仓价')
+        # 替代款由调用方（网页）单独成块渲染，这里不再重复写一遍 ——
+        # 否则页面上会出现两遍同样的候选列表（2026-10-27 实测踩到）。
+    elif A.lc_is_warn(out['life']):
+        out['notes'].insert(0, '⚠ 这个型号是停产预警（HALT_WARNING）—— 目前还能买，'
+                               '但长周期项目要留意交付时会不会已经停产')
 
     if out['bd'] not in (None, ''):
         k = str(out['bd']).strip()

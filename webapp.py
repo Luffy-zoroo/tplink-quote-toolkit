@@ -594,6 +594,24 @@ textarea:focus,input:focus,select:focus{outline:2px solid #bfd3ff;outline-offset
  border-radius:8px;padding:8px 10px;margin:8px 0 0;line-height:1.65}
 details{margin-top:10px}
 summary{font-size:14px;color:#1a56db;cursor:pointer;font-weight:600}
+/* 在产状态徽章：停产必须一眼看见，不能藏在备注里 */
+.lc{display:inline-block;font-size:11.5px;font-weight:700;padding:2px 8px;
+ border-radius:999px;margin-left:8px;vertical-align:2px;white-space:nowrap}
+.lc.halt{background:#fee2e2;color:#991b1b;border:1px solid #fca5a5}
+.lc.warn{background:#fef3c7;color:#92400e;border:1px solid #fcd34d}
+.lc.live{background:#dcfce7;color:#166534;border:1px solid #86efac}
+.lc.na{background:#f3f4f6;color:#6b7280;border:1px solid #d1d5db}
+.warn.red{background:#fef2f2;border-left-color:#dc2626;color:#991b1b}
+.warn.red b{color:#7f1d1d}
+.hl{margin:6px 0 0;padding-left:18px}
+.hl li{margin:5px 0;line-height:1.65}
+.card.halted{border-color:#fca5a5;background:#fffafa}
+.card.halted .pi{border-color:#fecaca;background:#fef2f2}
+.alts{font-size:13px;color:#991b1b;background:#fef2f2;border:1px solid #fecaca;
+ border-radius:8px;padding:9px 11px;margin:8px 0 0;line-height:1.7}
+.alts b{color:#7f1d1d}
+.alts code{background:#fff;border:1px solid #fecaca;border-radius:4px;
+ padding:1px 5px;font-size:12.5px}
 @media (max-width:440px){                          /* 手机窄屏：并排的控制改成上下 */
  .row{flex-direction:column;gap:0}
  .card{padding:16px}
@@ -1030,6 +1048,16 @@ def one_card(it):
     bits = [x for x in (esc(it.get('name') or ''), esc(it.get('series') or '')) if x]
     em = ' · '.join(bits)
 
+    # 在产状态（2026-10-27）：停产型号不能进报价表，所以这一条必须比价格更显眼。
+    # 找不到 life 字段 = 没连 CRM 或旧版脚本，标"未核"而不是默认当成在产。
+    life = str(it.get('life') or '').strip().upper()
+    _lc = {'HALT': ('halt', '⛔ 已停产'),
+           'HALT_WARNING': ('warn', '⚠ 停产预警'),
+           'PRODUCTION': ('live', '在产')}
+    _c, _t = _lc.get(life, ('na', '在产状态未核'))
+    badge = '<span class="lc %s">%s</span>' % (_c, _t)
+    card_cls = 'card halted' if life == 'HALT' else 'card'
+
     params = it.get('params') or []
     lis = ''.join('<li>%s</li>' % esc(p) for p in params)
     src = it.get('src')
@@ -1051,20 +1079,35 @@ def one_card(it):
 
     notes = ''.join('<div class="mnote">%s</div>' % _md_bold(n) for n in (it.get('notes') or []))
 
+    # 替代款单独一块（不用 mnote）：这是"下一步做什么"，不是"注意事项"
+    alts = it.get('alts') or []
+    alts_html = ''
+    if life == 'HALT':
+        if alts:
+            alts_html = ('<div class="alts"><b>同系列在产候选</b> —— 只是线索，'
+                         '参数/档次/价格都要重新核：<br>%s</div>'
+                         % '  '.join('<code>%s</code>' % esc(a) for a in alts))
+        else:
+            # 没有候选必须说清楚，否则用户以为"页面没显示"而不是"确实没有"
+            alts_html = ('<div class="alts">同系列<b>没有找到在产型号</b> → '
+                         '需要你指定替代款（问销售、或查最新选型表）。'
+                         '脚本不替你挑，挑错了参数价格全得重来。</div>')
+
     return """
-<div class="card">
-  <div class="mhd">%s<em>%s</em></div>
+<div class="%s">
+  <div class="mhd">%s%s<em>%s</em></div>
   <div class="pbar">%s%s%s%s</div>
   %s
   %s
   %s
   %s
-</div>""" % (head, em,
+  %s
+</div>""" % (card_cls, head, badge, em,
              cell('标准价', it.get('price'), '¥'),
              cell('业务折扣', it.get('bd')),
              cell('片区折扣', it.get('pq')),
              cell('总部折扣', it.get('hq')),
-             src_line, plist, notes, copybtn)
+             src_line, plist, notes, alts_html, copybtn)
 
 
 def one_result_body(d, q='', models='', with_price=True):
@@ -1280,7 +1323,8 @@ def result_body(s, ok, log, elapsed, report=None):
     else:
         head = '<h1>没填成</h1><div class="sub">下面这段是脚本输出，原样保留</div>'
         dl = ''
-    note = param_source_note(report) if ok else ''
+    # 停产排在最前面：型号是废的，参数来源对不对已经不重要了
+    note = (halt_note(report) + param_source_note(report)) if ok else ''
     return """
 %s
 <div class="card">
@@ -1392,6 +1436,55 @@ def run_fill(s, hr, mc, pc, kc, with_price,
     if ok:
         s['out'] = out
     return ok, log.strip() or ('退出码 %d' % p.returncode), report
+
+
+def halt_note(report):
+    """清单里出现停产型号的提示（2026-10-27）。
+
+    停产行**参数和价格都没填**，所以这条必须排在参数来源提示之前 ——
+    否则用户先看到"参数采用官网描述"，以为自己只要补参数就行。
+    """
+    halts, warns = [], []
+    seen_h, seen_w = set(), set()
+    for e in report or []:
+        k = e.get('kind')
+        if k not in ('停产', '停产预警'):
+            continue
+        m = (e.get('model') or e.get('halt_model') or '').strip()
+        if not m:
+            continue
+        key = m.upper()
+        if k == '停产':
+            if key in seen_h:
+                continue
+            seen_h.add(key)
+            halts.append(e)
+        else:
+            if key in seen_w:
+                continue
+            seen_w.add(key)
+            warns.append(e)
+    out = []
+    if halts:
+        rows = []
+        for e in halts:
+            alts = e.get('alts') or []
+            tail = ('　→ 在产候选：%s' % '、'.join(alts[:4])) if alts \
+                else '　→ 同系列没有在产型号，**需要你指定替代款**'
+            nm = ('（%s）' % e.get('product_name')) if e.get('product_name') else ''
+            rows.append('<li><b>第 %s 行 %s</b>%s%s</li>'
+                        % (e.get('row'), esc(e.get('model') or ''),
+                           esc(nm, 60), _md_bold(tail[:300])))
+        out.append('<div class="warn red"><b>⛔ 有 %d 个型号已停产（HALT），'
+                   '参数和价格都没有填</b><ul class="hl">%s</ul>'
+                   '换成在产款（或你指定）后重新上传一次。'
+                   '原表里这两格如果是客户自己填的，脚本没有改动。</div>'
+                   % (len(halts), ''.join(rows)))
+    if warns:
+        out.append('<div class="warn"><b>⚠ 有 %d 个型号是停产预警（HALT_WARNING）</b>：'
+                   '参数和价格已填，目前还能买；<b>长周期项目要留意交付时会不会已经停产</b>。<br>%s</div>'
+                   % (len(warns), esc('、'.join((e.get('model') or '') for e in warns), 400)))
+    return ''.join(out)
 
 
 def param_source_note(report):

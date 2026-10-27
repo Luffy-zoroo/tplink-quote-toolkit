@@ -1,0 +1,64 @@
+name: 仓库流量归档
+
+# GitHub 只留 14 天流量数据，过期永久删除、无法补抓 —— 所以每天都要跑一次。
+# 数据存到独立分支 traffic-data（不污染 main），页面从那个分支走 GitHub Pages。
+
+on:
+  schedule:
+    - cron: '5 0 * * *'      # 每天 UTC 00:05（北京时间 08:05）
+  workflow_dispatch:          # 也能手动点一下立刻跑
+
+permissions:
+  contents: write             # 推 traffic-data 分支用
+
+concurrency:
+  group: traffic-archive
+  cancel-in-progress: false
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # 把历史数据拉回来（第一次跑时分支还不存在，就建一个空的）
+      - name: 取回历史数据
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          rm -rf .traffic-data
+          if git clone --depth 1 --branch traffic-data "$URL" .traffic-data 2>/dev/null; then
+            echo "已有 traffic-data 分支，接着累积"
+          else
+            echo "第一次跑，新建 traffic-data 分支"
+            mkdir -p .traffic-data
+            git -C .traffic-data init -q -b traffic-data
+            git -C .traffic-data remote add origin "$URL"
+          fi
+
+      # 读流量要 PAT：默认 GITHUB_TOKEN 没有 Administration 权限，会 403
+      - name: 抓取并生成页面
+        env:
+          TRAFFIC_TOKEN: ${{ secrets.TRAFFIC_TOKEN }}
+        run: python traffic/archive.py --repo "$GITHUB_REPOSITORY" --out .traffic-data
+
+      - name: 提交到 traffic-data 分支
+        run: |
+          set -e
+          cd .traffic-data
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "数据没有变化，不提交"
+            exit 0
+          fi
+          git commit -q -m "traffic: $(date -u +%F)"
+          git push -q origin HEAD:traffic-data
+          echo "已更新 traffic-data 分支"

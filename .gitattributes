@@ -1,6 +1,11 @@
 # 统一行尾，避免不同平台产生无意义的 diff
 * text=auto eol=lf
 
+# 批处理：内容全 ASCII（中文提示交给 Python 打印，BAT 里写中文会被 cmd 从
+# 字节中间切断，实测报 "'?）' is not recognized"），只需保证 CRLF 行尾 ——
+# 用 LF 时 cmd 的 goto 标签跳转会出问题
+*.bat text eol=crlf
+
 *.png binary
 *.jpg binary
 *.xlsx binary

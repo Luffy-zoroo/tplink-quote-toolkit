@@ -38,5 +38,12 @@
    "uniques": 1
   }
  ],
- "referrers": []
+ "referrers": [],
+ "totals": {
+  "clones_count": 160,
+  "clones_uniques": 72,
+  "views_count": 39,
+  "views_uniques": 23,
+  "window_days": 14
+ }
 }

@@ -26,8 +26,10 @@ TRAFFIC_TOKEN 权限（这一步最容易踩坑）：
 
 输出的数字怎么读（写简历时别吹错）：
     views / clones 的"次数"可以相加，是准的；
-    uniques 是**每天各自独立**的访客数，跨天相加会重复计同一个人，
-    所以这里只报"日独立访客之和"和"单日最高"，不谎称是真 UV。
+    uniques **可以直接报**：接口顶层的 uniques 是整个 14 天窗口去重后的值
+    （实测每日相加 77 > 顶层 72，说明跨天重复的人已被合并），
+    它就是"这 14 天有多少个不同的人"。但它和次数一样包含 CI / 镜像 / 爬虫，
+    所以只能说"独立克隆者 72 人"，不能说"72 个同事在用"。
 """
 
 import argparse
@@ -160,6 +162,16 @@ def fetch(repo, token):
             daily.setdefault(d, {})['clones'] = it.get('count') or 0
             daily[d]['clone_uniques'] = it.get('uniques') or 0
     out['daily'] = daily
+    # 接口顶层返回的 count/uniques 是**整个 14 天窗口**的汇总，而且 uniques 已经
+    # 跨天去重过（实测：每日 uniques 相加 77 > 顶层 72）。这才是能对外说的"人数"。
+    # 注意它随窗口滚动，跟 daily 里累加的历史总量不是一个东西，别混用。
+    out['totals'] = {
+        'views_count': views.get('count') or 0,
+        'views_uniques': views.get('uniques') or 0,
+        'clones_count': clones.get('count') or 0,
+        'clones_uniques': clones.get('uniques') or 0,
+        'window_days': len(daily),
+    }
     print('  流量：%d 天（views %d / clones %d）'
           % (len(daily), views.get('count') or 0, clones.get('count') or 0))
 
@@ -226,6 +238,9 @@ def svg_line(dates, series, width=680, height=200):
     n = max(len(dates) - 1, 1)
 
     def x(i):
+        # 只有一个数据点时没有"跨度"可言，居中放着才像张图（否则贴着左轴）
+        if len(dates) == 1:
+            return pl + iw / 2
         return pl + iw * i / n
 
     def y(v):
@@ -240,11 +255,19 @@ def svg_line(dates, series, width=680, height=200):
                      % (pl, yy, width - pr, yy))
         parts.append('<text x="%d" y="%.1f" class="ax" text-anchor="end">%d</text>'
                      % (pl - 6, yy + 4, round(v)))
-    # 横轴日期：首、中、尾
+    # 横轴日期：首、中、尾。两端必须改对齐方式 —— 一直用 middle 的话，
+    # 最后一个标签以 x(尾) 为中心，右半截会画出 viewBox 被裁掉（"10-27" 变 "10-2"）。
     marks = sorted(set([0, len(dates) // 2, len(dates) - 1]))
+    last = len(dates) - 1
     for i in marks:
-        parts.append('<text x="%.1f" y="%d" class="ax" text-anchor="middle">%s</text>'
-                     % (x(i), height - 8, dates[i][5:]))
+        if i == 0 and last > 0:
+            anchor = 'start'
+        elif i == last and last > 0:
+            anchor = 'end'
+        else:
+            anchor = 'middle'
+        parts.append('<text x="%.1f" y="%d" class="ax" text-anchor="%s">%s</text>'
+                     % (x(i), height - 8, anchor, dates[i][5:]))
     # 折线
     for s in series:
         d = s['data']
@@ -310,6 +333,10 @@ def build_summary(daily, snaps, latest):
     ssum['clones'] = sum(v.get('clones') or 0 for v in daily.values())
     ssum['uniques_sum'] = sum(v.get('view_uniques') or 0 for v in daily.values())
     ssum['clone_uniques_sum'] = sum(v.get('clone_uniques') or 0 for v in daily.values())
+    # 真实人数用接口顶层的 uniques（跨天已去重）；老数据没存 totals 时才退回累加值
+    tot = (latest or {}).get('totals') or {}
+    ssum['uv_views'] = int(tot.get('views_uniques') or 0) or ssum['uniques_sum']
+    ssum['uv_clones'] = int(tot.get('clones_uniques') or 0) or ssum['clone_uniques_sum']
     peak = max(daily.items(), key=lambda kv: (kv[1].get('views') or 0))
     ssum['peak_date'] = peak[0]
     ssum['peak_views'] = peak[1].get('views') or 0
@@ -377,13 +404,14 @@ td.mono{font-variant-numeric:tabular-nums}
   <h2>流量总览<span class="tag">$first ~ $last，$span 天</span></h2>
   <div class="grid">
     <div class="k"><b>$views</b><span>累计浏览（次）</span></div>
+    <div class="k"><b>$uv_views</b><span>独立访客（人）</span></div>
     <div class="k"><b>$clones</b><span>累计克隆（次）</span></div>
-    <div class="k"><b>$peak_views</b><span>单日最高浏览</span></div>
-    <div class="k"><b>$peak_uniques</b><span>单日最高访客（人）</span></div>
+    <div class="k"><b>$uv_clones</b><span>独立克隆者（人）</span></div>
   </div>
   <div class="note" style="margin-top:12px">
-    独立访客按天各自算，<b>跨天相加会重复计同一个人</b>，所以不报"总 UV"。
-    上表两个"最高"就是能拿去说的口径。
+    <b>人数</b>取接口按 14 天窗口去重后的值，可以直接说"这 14 天有 $uv_clones 个不同的人克隆过"。
+    单日最高浏览 $peak_views 次（$peak_date），当天 $peak_uniques 人。
+    <b>次数和人数都包含 CI、镜像与爬虫</b>，别等同于"有多少同事在用"。
   </div>
 </div>
 
@@ -439,8 +467,9 @@ td.mono{font-variant-numeric:tabular-nums}
   <h2>可以拿去写简历的一句话</h2>
   <p class="quote">$quote</p>
   <div class="note" style="margin-top:10px">
-    数字来源：GitHub Traffic / Repository API，$first ~ $last。别把"累计浏览"说成"用户量"，
-    也别把 uniques 相加当总 UV —— 面试官一问就露。
+    数字来源：GitHub Traffic / Repository API，$first ~ $last。别把"累计浏览"说成"用户量"；
+    <b>人数可以直接说</b>（接口已跨天去重），但要说"独立克隆者"，不是"同事"——
+    里面混着爬虫和镜像。
   </div>
 </div>
 
@@ -481,9 +510,10 @@ def render(repo, daily, snaps, latest, ssum, updated):
     refs = ssum.get('referrers') or []
     top_ref = refs[0]['site'] if refs else ''
     quote = ('独立维护开源项目 %s：%s 至 %s 期间累计被浏览 %d 次、被克隆 %d 次，'
-             '单日最高 %d 次浏览 / %d 人访问%s，仓库获 %d Star、%d Fork。'
+             '期间 %d 个独立克隆者，单日最高 %d 次浏览 / %d 人访问%s，'
+             '仓库获 %d Star、%d Fork。'
              % (repo.split('/')[-1], ssum['first'], ssum['last'], ssum['views'],
-                ssum['clones'], ssum['peak_views'], ssum['peak_uniques'],
+                ssum['clones'], ssum['uv_clones'], ssum['peak_views'], ssum['peak_uniques'],
                 ('，主要入口为 %s' % top_ref) if top_ref else '',
                 ssum['stars'], ssum['forks']))
 
@@ -498,7 +528,9 @@ def render(repo, daily, snaps, latest, ssum, updated):
         or 'GitHub 仓库流量长期归档',
         first=ssum['first'], last=ssum['last'], span=ssum['span'],
         views=ssum['views'], clones=ssum['clones'],
+        uv_views=ssum['uv_views'], uv_clones=ssum['uv_clones'],
         peak_views=ssum['peak_views'], peak_uniques=ssum['peak_uniques'],
+        peak_date=ssum.get('peak_date') or '',
         chart_flow=svg_line(dates, series_flow),
         chart_star=svg_line(star_dates, series_star),
         stars=ssum['stars'], forks=ssum['forks'], watchers=ssum['watchers'],
@@ -527,9 +559,11 @@ def render_summary_md(repo, ssum):
 | 指标 | 数值 |
 |---|---|
 | 累计浏览 | %d 次 |
+| 独立访客 | %d 人 |
 | 单日最高浏览 | %d 次（%s） |
 | 单日最高访客 | %d 人 |
 | 累计克隆 | %d 次 |
+| 独立克隆者 | %d 人 |
 | Stars | %d |
 | Forks | %d |
 | Open Issues | %d |
@@ -543,17 +577,19 @@ def render_summary_md(repo, ssum):
 **可写进简历的一句话**
 
 > 独立维护开源项目 %s：%s 至 %s 累计被浏览 %d 次、被克隆 %d 次，
-> 单日最高 %d 次浏览 / %d 人访问，获 %d Star、%d Fork。
+> 期间 %d 个独立克隆者，单日最高 %d 次浏览 / %d 人访问，获 %d Star、%d Fork。
 
-**口径提醒**：`独立访客` 是每天各自统计的，跨天相加会重复计同一个人，
-所以只报"单日最高"，不报"总 UV"；`克隆次数` 含爬虫与镜像，别等同于"使用人数"。
+**口径提醒**：`独立访客 / 独立克隆者` 取接口按 14 天窗口**去重后**的值，
+可以直接说"这 14 天有 N 个不同的人克隆过"；但**次数和人数都包含 CI、镜像与爬虫**，
+所以别说成"有 N 个同事在用"。`累计` 那几个是历史累加，范围比 14 天宽。
 """ % (repo, ssum['first'], ssum['last'], ssum['span'],
-       ssum['views'], ssum['peak_views'], ssum['peak_date'], ssum['peak_uniques'],
-       ssum['clones'], ssum['stars'], ssum['forks'], ssum['open_issues'],
+       ssum['views'], ssum['uv_views'], ssum['peak_views'], ssum['peak_date'],
+       ssum['peak_uniques'], ssum['clones'], ssum['uv_clones'],
+       ssum['stars'], ssum['forks'], ssum['open_issues'],
        ssum['commits'], ssum['contributors'], ssum['releases'], ssum['downloads'],
        fmt_kb(ssum['size_kb']), refs, paths,
        repo.split('/')[-1], ssum['first'], ssum['last'], ssum['views'],
-       ssum['clones'], ssum['peak_views'], ssum['peak_uniques'],
+       ssum['clones'], ssum['uv_clones'], ssum['peak_views'], ssum['peak_uniques'],
        ssum['stars'], ssum['forks'])
 
 
@@ -580,8 +616,14 @@ def selftest():
     ssum = build_summary(daily, snaps, latest)
     page = render('owner/name', daily, snaps, latest, ssum, '2026-10-12 00:00 UTC')
     md = render_summary_md('owner/name', ssum)
+    # 接口顶层 uniques 是跨天去重的，必须盖过"每日独立数相加"
+    latest_tot = dict(latest)
+    latest_tot['totals'] = {'views_count': 999, 'views_uniques': 77,
+                            'clones_count': 999, 'clones_uniques': 66,
+                            'window_days': 12}
+    ssum_tot = build_summary(daily, snaps, latest_tot)
     checks = [
-        ('总览数字', '累计浏览' in page),
+        ('总览数字', '累计浏览' in page and '独立克隆者' in page),
         ('折线图', '<svg' in page and 'polyline' in page),
         ('条形图', '<rect' in page),
         ('明细表', '最近 14 天明细' in page),
@@ -590,6 +632,10 @@ def selftest():
         ('天数统计', ssum['span'] == 12),
         ('浏览合计', ssum['views'] == sum(v['views'] for v in daily.values())),
         ('最高单日', ssum['peak_views'] == max(v['views'] for v in daily.values())),
+        # 老数据没有 totals 时退回累加值；有 totals 时必须用去重值
+        ('人数回退(无totals)', ssum['uv_clones'] == ssum['clone_uniques_sum']),
+        ('人数取去重值', ssum_tot['uv_clones'] == 66 and ssum_tot['uv_views'] == 77),
+        ('日期标签不被裁', 'text-anchor="end"' in page and 'text-anchor="start"' in page),
     ]
     out = os.path.join(tempfile.gettempdir(), 'traffic-selftest.html')
     with io.open(out, 'w', encoding='utf-8', newline='\n') as f:
@@ -644,6 +690,7 @@ def main():
     snaps[today] = got['snapshot']
     latest_all['referrers'] = got['referrers']
     latest_all['paths'] = got['paths']
+    latest_all['totals'] = got['totals']      # 滚动窗口汇总，每次覆盖
     latest_all['at'] = today
 
     save_json(f_daily, daily)

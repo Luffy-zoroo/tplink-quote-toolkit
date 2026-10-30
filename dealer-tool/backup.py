@@ -65,7 +65,10 @@ LIST_FIELDS = {
     'dealerProductType': 'dealerProductType',
     'price_untrusted': 'price',        # 平台价不可信，只作量级参考
     'boxNumber': 'boxNumber',
-    'halt': 'haltProduct',             # 停产标记，选型前必看
+    # ⚠ 平台的 haltProduct 实测基本不更新（2850 个型号 0 条为 True），
+    #   所以**不写 `halt`**，只写 `halt_platform` 留作观察。
+    #   `halt` 由 enrich.py crm 按 CRM 的 lifeCycle 独占写入，别的脚本不许碰。
+    'halt_platform': 'haltProduct',
 }
 
 
@@ -318,12 +321,12 @@ def cmd_refresh(d, a):
             continue
         for local_k, plat_k in LIST_FIELDS.items():
             v = row.get(plat_k)
-            if local_k in ('industry', 'halt'):
+            if local_k in ('industry', 'halt_platform'):
                 v = bool(v)                    # 平台 None/False 一律视为「否」
             elif v in (None, '', [], {}):
                 continue                       # 平台没给值就别把本地覆盖成空
             ov = rec.get(local_k)
-            cmp_old = bool(ov) if local_k in ('industry', 'halt') else ov
+            cmp_old = bool(ov) if local_k in ('industry', 'halt_platform') else ov
             if cmp_old != v:
                 changed.append((m, local_k, ov, v))
             rec[local_k] = v
@@ -370,6 +373,7 @@ def cmd_refresh(d, a):
         S.save(st, a.store)
 
     # ---- 5) 报告 ----
+    # 停产只认 CRM（平台 haltProduct 那个字段基本不更新）
     halted = [m for m, r in old.items() if r.get('halt')]
     lacking = [m for m in by_model if m in old and not (old[m].get('spec')
                                                        and old[m].get('desc'))]
@@ -448,7 +452,9 @@ def cmd_stats(d, a):
     print('产品数  :', len(ps))
     print('含规格  :', sum(1 for r in ps.values() if r.get('spec')))
     print('含描述  :', sum(1 for r in ps.values() if r.get('desc')))
-    print('已停产  :', sum(1 for r in ps.values() if r.get('halt')))
+    print('已停产  :', sum(1 for r in ps.values() if r.get('halt')),
+          '（CRM 口径；平台 haltProduct 为 True 的 %d 个）'
+          % sum(1 for r in ps.values() if r.get('halt_platform')))
     missing = [m for m, r in ps.items() if r.get('missing_since')]
     print('平台已下架:', len(missing), ('（' + ', '.join(missing[:8]) + '）') if missing else '')
     print('渠道/行业:', Counter('行业' if r.get('industry') else '渠道' for r in ps.values()).most_common())
@@ -496,7 +502,7 @@ def cmd_fill(d, a):
     """补齐缺失字段：库内已有但 desc/spec 为空的型号，重新抓一遍"""
     st = S.load(a.store)
     lack = [r for r in st['products'].values()
-            if (not r.get('desc')) or (not r.get('spec'))]
+            if a.force or (not r.get('desc')) or (not r.get('spec'))]
     if a.limit:
         lack = lack[:a.limit]
     rows = [{'productId': r['productId'], 'productModel': r['model'],
@@ -520,6 +526,40 @@ def cmd_fill(d, a):
             print('   已补齐 %d' % n, flush=True)
     S.save(st, a.store)
     print('补齐 %d 条 → %s' % (n, a.store))
+
+
+def cmd_tidy(d, a):
+    """就地清洗已有记录：把描述里的 HTML 标签压成可读文本。
+
+    2026-10-30 用：`--fast fill` 全量重抓走的是官网 `spotlight`（HTML 原文），
+    把 2255 条原本干净的平台描述洗成了 `<ul><li>…`。`store.plain_desc()` 修好了入库侧，
+    但已经写进库的脏数据得单独洗一遍，否则要再花 5 分钟重抓一次。
+    """
+    st = S.load(a.store)
+    ps = st['products']
+    n = 0
+    changed = 0
+    for rec in ps.values():
+        if rec.get('desc'):
+            n += 1
+            clean = S.plain_desc(rec['desc'])
+            # 清洗后变空的（原文只有 `<p></p>` 这类空壳）不要写回，
+            # 否则等于把这条描述删了 —— 2026-10-30 这样丢过 23 条
+            if clean and clean != rec['desc']:
+                rec['desc'] = clean
+                changed += 1
+        if rec.get('spotlight'):
+            clean = S.plain_desc(rec['spotlight'])
+            if clean and clean != rec['spotlight']:
+                rec['spotlight'] = clean
+    left = sum(1 for r in ps.values() if '<' in (r.get('desc') or ''))
+    st['_meta']['desc_tidied'] = time.strftime('%Y-%m-%d %H:%M:%S')
+    if a.no_save:
+        print('（--no-save，未落盘）清洗 %d / %d 条，仍有 HTML 的 %d 条' % (changed, n, left))
+        return
+    S.save(st, a.store)
+    print('描述清洗：检查 %d 条，改写 %d 条；仍有 HTML 的 %d 条 → %s'
+          % (n, changed, left, a.store))
 
 
 def cmd_html(d, a):
@@ -546,9 +586,11 @@ def main():
     p.add_argument('--no-spec', action='store_true', help='不抓官网规格（快）')
     p.add_argument('--no-save', action='store_true')
     p.add_argument('--fast', action='store_true', help='fill 时只打官网接口（快一倍）')
+    p.add_argument('--force', action='store_true',
+                   help='fill 时连已有 desc+spec 的一起重抓（全量刷新官网规格）')
     p.add_argument('--out', default=None)
     sub = p.add_subparsers(dest='cmd', required=True)
-    for name in ['login', 'taxonomy', 'all', 'refresh', 'stats', 'html', 'fill']:
+    for name in ['login', 'taxonomy', 'all', 'refresh', 'stats', 'html', 'fill', 'tidy']:
         s = sub.add_parser(name)
         if name in ('all', 'refresh'):
             s.add_argument('--module', nargs='*', default=None)
@@ -560,11 +602,12 @@ def main():
         s.add_argument('keyword', nargs='+' if name in ('models', 'find') else 1)
     a = p.parse_args()
 
-    need_net = a.cmd not in ('stats', 'html', 'show', 'find')
+    need_net = a.cmd not in ('stats', 'html', 'show', 'find', 'tidy')
     d = Dealer(*require_creds()) if need_net else Dealer()
     {'login': cmd_login, 'taxonomy': cmd_taxonomy, 'cat': cmd_cat, 'search': cmd_search,
      'models': cmd_models, 'all': cmd_all, 'refresh': cmd_refresh, 'show': cmd_show,
-     'find': cmd_find, 'stats': cmd_stats, 'html': cmd_html, 'fill': cmd_fill}[a.cmd](d, a)
+     'find': cmd_find, 'stats': cmd_stats, 'html': cmd_html, 'fill': cmd_fill,
+     'tidy': cmd_tidy}[a.cmd](d, a)
 
 
 if __name__ == '__main__':

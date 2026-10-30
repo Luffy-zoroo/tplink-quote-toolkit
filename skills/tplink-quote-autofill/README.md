@@ -336,6 +336,7 @@ A：脚本**不会改你填过的值**。不一致通常是你当时有特殊商
 | `README.md` | 本文件，给人看的通俗说明 |
 | `scripts/autofill_quote.py` | 主程序：读清单 → 查控标库/官网 → 查 CRM 算价 → 写回 Excel |
 | `scripts/sanitize_params.py` | 品牌词清洗，可单独调用 |
+| `scripts/xlsx_lint.py` | **交付前结构体检**：重复单元格 / 列序错乱 / 样式索引越界 / 型号-单价配对。退出码 2 = 不许交付。只要用脚本改过 xlsx 就跑一遍 |
 | `references/kongbiao_library.md` | 控标库字段结构、型号分布、命名坑、品牌词统计 |
 
 ---

@@ -196,7 +196,21 @@ python license.py --list                          # 离线看映射表
 **"停车点位"与"道闸数"的对应**：一个道闸 = 一路。核对时先数清单里的道闸/抓拍机数量，再减平台自带路数。
 
 ## 官网参数查询（控标库查不到时兜底，2026-08-27）
-- ⭐ **拿「完整参数 + 官方彩页 PDF」的最快直链（2026-09-21 实测）**：`https://service.tp-link.com.cn/download/pdf/<productId>.pdf`
+- ⭐⭐ **首选：按型号直调官网规格接口（2026-10-21 实测，最省事、最结构化，不用先搜 productId）**：
+  ```
+  https://www.tp-link.com.cn/publicservice/productinfo?brand=TPLINK&productModel=<型号>
+  ```
+  返回 `var PRODUCT_INFO={...}`（**不是纯 JSON**，需 `raw[raw.find('var PRODUCT_INFO=')+17:].rstrip().rstrip(';')` 再 `json.loads`）。
+  顶层字段：`productModel / productId / productName / spotlight`（特性 bullet 的 `<ul><li>`）、
+  `detail`（产品简介 HTML）、`specification`（**结构化规格 JSON 字符串，含「硬件规格」「软件功能」全部分组与条目**）、
+  `SOFTWARE / DOCUMENT / VIDEO`（升级软件、安装手册、彩页、FAQ 的**直链**）。
+  实测 `TL-AC300` 一次拿到端口/CPU/内存/FLASH/尺寸/功耗 + 可管理 AP 数/SSID 数/认证方式/无线安全等全部条目，
+  **比 `search.html` → `product_<id>.html` → 抓 `#smbproductFeature` 更全且更稳**（后者只有 6 条营销特性、常无规格段）。
+  型号不存在时返回的 `PRODUCT_INFO` 里 `productModel` 为 `null`，可据此判"官网无此型号"。
+- 项目机型（CRM 里 `projectProduct=true` 且 `officialRelateId=null`）官网查不到 → 走**合作伙伴平台**兜底（见同目录 `dealer-tool/dealer_api.py`）：
+  `find_by_model()` **无权限（-1002）**，要用 `find_products(searchValue=<型号>)` 拿 `productId`，再 `detail(productId)` 取 `productDesc`（分条产品描述，含处理器/端口/带机量/功能项）。
+  实测 `TL-NR5106-24G-SD`（productId=12133）就是这样拿到 16 千兆电+8 千兆光+4×2.5G+2×万兆、四核 ARM、带机 2000 台的。
+- ⭐ **拿「完整参数 + 官方彩页 PDF」的直链**：`https://service.tp-link.com.cn/download/pdf/<productId>.pdf`
   - `<productId>` 就是产品页 `product_<id>.html` 里的数字。例：`TL-IR4005` → `.../pdf/3004.pdf`；`TL-R483G工业级` → `.../pdf/1653.pdf`。
   - 返回的就是官方**产品彩页 PDF**，含 产品简介 / 功能特性 / **完整技术参数规格** / **完整软件功能**（比 HTML 规格页更全，是同一份对外资料）。
   - 抽文本：`pip install pypdf -t ./pylibs` 后 `PYTHONPATH=./pylibs python -c "from pypdf import PdfReader; ..."`。**注意 Read 工具读不了这种 PDF**（提示 binary），必须走 pypdf。

@@ -4,16 +4,19 @@
 
 改之前先读这四条，都是踩过的设计决定：
 
-1. **身份 = 每人一个随机 token**，就是链接里的 `?k=`。
-   不做"用户名 + 密码登录页"——同事打开链接就是身份，少一步就少一堆求助。
-   链接由管理员在 /admin 生成，发给人就行。
+1. **身份 = CRM 账号密码**（2026-10-29 改）。打开网页先登录，填自己的 CRM 邮箱密码，
+   服务端真去 CRM 登一次，验过才发会话 cookie。**不填就什么都看不到**。
+   以前的 `?k=` 链接即身份已经作废 —— 那条链接谁拿到都能用，等于没有鉴权。
+   验证通过后密码会加密存下来（算价必须拿它去登录 CRM），所以这不是"验一次就忘掉"。
 
 2. **CRM 密码加密落盘**，用 Windows DPAPI（绑定当前 Windows 账户）。
    换 Windows 账户 / 换机器就解不开 → 只能重新填。这不是"绝对安全"：
-   能登录这台 Windows 的人仍能解密，所以别把服务开到公网。
+   **能拿到这台机器的这个 Windows 账户、或者攻破服务进程的人，仍能解密全部人的密码**。
+   这是"把密码集中放在一台机器"的架构，不是零知识，挂公网前必须想清楚。
 
-3. **使用记录进 sqlite**（usage.db），只记「谁、什么时候、跑了几行、耗时、命中情况」，
-   **不记型号原文、不记文件名**。管理页能看汇总，能导 CSV。
+3. **使用记录进 sqlite**（usage.db），记「谁、什么时候、跑了几行、耗时、命中情况、
+   文件多大、上传收多久」，**不记型号原文、不记文件名**。
+   用户主动点「反馈」是唯一的例外：那一次会留清单副本 + 运行台账，页面上写明了才点。
 
 4. 所有文件都在 `%USERPROFILE%\\.workbuddy\\tplink-toolkit\\`，不进仓库；
    `install.py` 重装技能不会删这里（技能目录会被 rmtree，这个目录不会）。
@@ -24,13 +27,20 @@ import csv
 import io
 import json
 import os
+import re
 import secrets
+import shutil
 import sqlite3
+import threading
 import time
 
 STATE_DIR = os.path.join(os.path.expanduser('~'), '.workbuddy', 'tplink-toolkit')
 USERS_FILE = os.path.join(STATE_DIR, 'users.json')
 DB_FILE = os.path.join(STATE_DIR, 'usage.db')
+SESS_FILE = os.path.join(STATE_DIR, 'logins.json')   # 登录会话（可重启不丢）
+FB_DIR = os.path.join(STATE_DIR, 'feedback')          # 反馈时留下的清单副本
+
+_L = threading.Lock()
 
 ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789'   # 去掉了 l/i/o/0/1，手抄不容易错
 
@@ -189,10 +199,113 @@ def update(uid, **kw):
     return hit
 
 
+def by_email(email):
+    """按 CRM 邮箱找人（邮箱就是登录账号，大小写不敏感）。"""
+    e = (email or '').strip().lower()
+    if not e:
+        return None
+    for u in load()['users']:
+        if (u.get('email') or '').strip().lower() == e:
+            return u
+    return None
+
+
+def ensure(email, name='', role='user'):
+    """登录成功后建档：邮箱没注册过就建一个，注册过就复用（姓名空着才补）。"""
+    u = by_email(email)
+    if u:
+        if name and not (u.get('name') or '').strip():
+            update(u['id'], name=name)
+            u = by_id(u['id'])
+        return u
+    return add(name or (email or '').split('@')[0] or '未命名', role=role,
+               email=(email or '').strip())
+
+
 def set_creds(uid, email, pwd, remember=True):
     """写 CRM 账号。remember=False 时只写邮箱、不存密码（下次还要输）。"""
     return update(uid, email=(email or '').strip(),
                   pwd=enc(pwd) if (pwd and remember) else '')
+
+
+# ------------------------------------------------------------------ 登录会话
+def _load_sess():
+    try:
+        with io.open(SESS_FILE, encoding='utf-8') as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_sess(d):
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with io.open(SESS_FILE, 'w', encoding='utf-8', newline='\n') as f:
+            json.dump(d, f, indent=1, sort_keys=True)
+    except Exception:
+        pass
+
+
+def new_login(uid, days=30.0, ip='', ua=''):
+    """发一个登录会话。落盘而不是只放内存 —— start.bat 崩一次就重启，
+    内存会话会让所有人平白掉线。"""
+    with _L:
+        d = _load_sess()
+        now = time.time()
+        d = {k: v for k, v in d.items() if (v.get('exp') or 0) > now}
+        sid = secrets.token_urlsafe(24)
+        d[sid] = {'uid': uid, 'exp': now + days * 86400,
+                  'ip': ip or '', 'ua': (ua or '')[:120],
+                  'at': time.strftime('%Y-%m-%d %H:%M')}
+        _save_sess(d)
+        return sid
+
+
+def by_login(sid):
+    """会话 → 记录。过期就顺手删掉。"""
+    if not sid:
+        return None
+    d = _load_sess()
+    v = d.get(sid)
+    if not v:
+        return None
+    if (v.get('exp') or 0) <= time.time():
+        with _L:
+            d = _load_sess()
+            if d.pop(sid, None) is not None:
+                _save_sess(d)
+        return None
+    return v
+
+
+def drop_login(sid):
+    if not sid:
+        return
+    with _L:
+        d = _load_sess()
+        if d.pop(sid, None) is not None:
+            _save_sess(d)
+
+
+def drop_logins_of(uid):
+    """停用某人时把他的会话全踢掉，不用等他重开浏览器。"""
+    with _L:
+        d = _load_sess()
+        n = len(d)
+        d = {k: v for k, v in d.items() if v.get('uid') != uid}
+        if len(d) != n:
+            _save_sess(d)
+
+
+def purge_logins():
+    """清过期会话（janitor 定时调）。"""
+    with _L:
+        d = _load_sess()
+        now = time.time()
+        alive = {k: v for k, v in d.items() if (v.get('exp') or 0) > now}
+        if len(alive) != len(d):
+            _save_sess(alive)
 
 
 def creds(u):
@@ -247,34 +360,44 @@ def _conn():
         rows integer default 0, models integer default 0,
         secs real default 0, ok integer default 1,
         kb_hit integer default 0, kb_web integer default 0,
-        kb_none integer default 0, ip text default '', note text default '')""")
-    # 老库补列（note 是后加的，用来记"看了谁的凭据"这种少量文字）
+        kb_none integer default 0, ip text default '', note text default '',
+        up_secs real default 0, parse_secs real default 0, kb integer default 0)""")
+    # 老库补列。都走 try：某台机器上库可能正被另一个进程占着，加不上也不能让请求挂掉
     try:
         cols = [r[1] for r in c.execute('pragma table_info(usage)').fetchall()]
-        if 'note' not in cols:
-            c.execute("alter table usage add column note text default ''")
-            c.commit()
+        for name, ddl in (('note', "text default ''"),
+                          ('up_secs', 'real default 0'),
+                          ('parse_secs', 'real default 0'),
+                          ('kb', 'integer default 0')):
+            if name not in cols:
+                c.execute('alter table usage add column %s %s' % (name, ddl))
+        c.commit()
     except Exception:
         pass
     return c
 
 
 def log(uid, name, kind, rows=0, models=0, secs=0.0, ok=1,
-        kb_hit=0, kb_web=0, kb_none=0, ip='', note=''):
-    """记一条使用。kind: upload / run / one / bind / viewcred / admin。
+        kb_hit=0, kb_web=0, kb_none=0, ip='', note='',
+        up_secs=0.0, parse_secs=0.0, kb=0):
+    """记一条使用。kind: upload / run / one / login / bind / viewcred / admin / feedback。
 
     **清单/型号原文一律不记**，只记数字。唯一的自由文本是 note，
-    目前只用来记"谁查看了谁的 CRM 凭据"（审计用）。
+    目前只用来记"谁查看了谁的 CRM 凭据"这类审计文字。
+    up_secs = 服务端收完请求体的耗时（含网络传输），parse_secs = 解析 Excel 的耗时，
+    kb = 上传文件大小。这三项是用户问"一次上传花了多少流量/时间"时要看的。
     """
     try:
         c = _conn()
         try:
             c.execute('insert into usage(ts,uid,name,kind,rows,models,secs,ok,'
-                      'kb_hit,kb_web,kb_none,ip,note) values(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                      'kb_hit,kb_web,kb_none,ip,note,up_secs,parse_secs,kb) '
+                      'values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
                       (time.strftime('%Y-%m-%d %H:%M:%S'), uid or '', name or '',
                        kind, int(rows or 0), int(models or 0), float(secs or 0),
                        int(1 if ok else 0), int(kb_hit or 0), int(kb_web or 0),
-                       int(kb_none or 0), ip or '', note or ''))
+                       int(kb_none or 0), ip or '', note or '',
+                       float(up_secs or 0), float(parse_secs or 0), int(kb or 0)))
             c.commit()
         finally:
             c.close()
@@ -293,16 +416,22 @@ def summary():
                                    sum(case when kind='run' then rows else 0 end) rows,
                                    sum(models) models,
                                    sum(case when ok=0 then 1 else 0 end) bad,
-                                   max(ts) last, avg(secs) secs
+                                   max(ts) last,
+                                   avg(case when kind='run' then secs end) run_s,
+                                   avg(case when kind='upload' then up_secs end) up_s,
+                                   avg(case when kind='upload' then parse_secs end) pa_s,
+                                   sum(case when kind='upload' then kb else 0 end) kb
                             from usage group by uid order by n desc""").fetchall()
     finally:
         c.close()
     people = [{'name': r[1] or '(未知)', 'n': r[2], 'rows': r[3] or 0,
                'models': r[4] or 0, 'bad': r[5] or 0, 'last': r[6] or '',
-               'secs': round(r[7] or 0, 1)} for r in rows]
+               'run_s': round(r[7] or 0, 1), 'up_s': round(r[8] or 0, 2),
+               'pa_s': round(r[9] or 0, 2), 'kb': r[10] or 0} for r in rows]
     total = {'n': sum(p['n'] for p in people),
              'rows': sum(p['rows'] for p in people),
-             'models': sum(p['models'] for p in people)}
+             'models': sum(p['models'] for p in people),
+             'kb': sum(p['kb'] for p in people)}
     return {'people': people, 'total': total}
 
 
@@ -312,13 +441,15 @@ def recent(limit=40):
     except Exception:
         return []
     try:
-        rows = c.execute("""select ts,name,kind,rows,models,secs,ok,kb_hit,kb_web,kb_none,note
+        rows = c.execute("""select ts,name,kind,rows,models,secs,ok,kb_hit,kb_web,
+                                   kb_none,note,up_secs,parse_secs,kb
                             from usage order by id desc limit ?""", (limit,)).fetchall()
     finally:
         c.close()
     return [{'ts': r[0], 'name': r[1], 'kind': r[2], 'rows': r[3], 'models': r[4],
              'secs': r[5], 'ok': r[6], 'kb_hit': r[7], 'kb_web': r[8],
-             'kb_none': r[9], 'note': r[10] or ''} for r in rows]
+             'kb_none': r[9], 'note': r[10] or '', 'up_secs': r[11] or 0,
+             'parse_secs': r[12] or 0, 'kb': r[13] or 0} for r in rows]
 
 
 def csv_text():
@@ -329,13 +460,15 @@ def csv_text():
         return ''
     try:
         rows = c.execute("""select ts,name,kind,rows,models,secs,ok,kb_hit,kb_web,
-                                   kb_none,ip,note from usage order by id""").fetchall()
+                                   kb_none,ip,note,kb,up_secs,parse_secs
+                            from usage order by id""").fetchall()
     finally:
         c.close()
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator='\n')
-    w.writerow(['时间', '用户', '动作', '清单行数', '型号数', '耗时秒', '成功',
-                '控标库命中', '官网兜底', '都没命中', '来源IP', '备注'])
+    w.writerow(['时间', '用户', '动作', '清单行数', '型号数', '处理秒', '成功',
+                '控标库命中', '官网兜底', '都没命中', '来源IP', '备注',
+                '文件KB', '接收秒', '解析秒'])
     for r in rows:
         r = list(r)
         r[2] = kind_cn(r[2])          # 动作写中文，Excel 里好看
@@ -345,5 +478,129 @@ def csv_text():
 
 def kind_cn(k):
     return {'upload': '上传清单', 'run': '填参数+价格', 'one': '查型号',
-            'bind': '绑 CRM 账号', 'admin': '管理页',
+            'bind': '绑 CRM 账号', 'admin': '管理页', 'login': '登录',
+            'logout': '退出登录', 'feedback': '提交反馈',
             'viewcred': '查看凭据'}.get(k, k or '')
+
+
+# ------------------------------------------------------------------ 反馈
+def _fb_dir():
+    os.makedirs(FB_DIR, exist_ok=True)
+    return FB_DIR
+
+
+def _fb_keep(fid, src_path, fname):
+    """把这次上传的原件复制一份留底。返回落盘路径（失败返回 ''）。"""
+    try:
+        if not (src_path and os.path.exists(src_path)):
+            return ''
+        ext = os.path.splitext(fname or src_path)[1] or '.xlsx'
+        base = re.sub(r'[^\w\u4e00-\u9fa5.-]+', '_',
+                      os.path.splitext(fname or 'qingdan')[0])[:60] or 'qingdan'
+        dst = os.path.join(_fb_dir(), '%d_%s%s' % (fid, base, ext))
+        shutil.copyfile(src_path, dst)
+        return dst
+    except Exception:
+        return ''
+
+
+def add_feedback(uid, name, note, sid='', fname='', kb=0, rows=0, models=0,
+                 ok=1, log_txt='', report='', src_path=''):
+    """存一条反馈。src_path 给了就把清单原件复制进 feedback/ 留底。"""
+    fid = 0
+    try:
+        c = _conn()
+        try:
+            c.execute("""create table if not exists feedback(
+                id integer primary key autoincrement,
+                ts text not null, uid text, name text, sid text,
+                note text, fname text, kb integer default 0,
+                rows integer default 0, models integer default 0,
+                ok integer default 1, log_txt text, report text,
+                file text default '', done integer default 0)""")
+            cur = c.execute(
+                'insert into feedback(ts,uid,name,sid,note,fname,kb,rows,'
+                'models,ok,log_txt,report) values(?,?,?,?,?,?,?,?,?,?,?,?)',
+                (time.strftime('%Y-%m-%d %H:%M:%S'), uid or '', name or '',
+                 sid or '', note or '', fname or '', int(kb or 0),
+                 int(rows or 0), int(models or 0), int(1 if ok else 0),
+                 (log_txt or '')[:20000], (report or '')[:60000]))
+            # lastrowid 在 cursor 上，不在 connection 上 —— 写错这一步会让整条反馈
+            # 静默丢掉（except 吞掉 AttributeError，页面还显示"收到了"）。踩过一次。
+            fid = cur.lastrowid
+            p = _fb_keep(fid, src_path, fname)
+            if p:
+                c.execute('update feedback set file=? where id=?', (p, fid))
+            c.commit()
+        finally:
+            c.close()
+    except Exception:
+        return 0
+    return fid
+
+
+def list_feedback(limit=30, only_open=False):
+    try:
+        c = _conn()
+    except Exception:
+        return []
+    try:
+        sql = """select id,ts,name,note,fname,kb,rows,models,ok,done,file
+                 from feedback %s order by id desc limit ?"""
+        sql = sql % ('where done=0' if only_open else '')
+        rows = c.execute(sql, (limit,)).fetchall()
+    except Exception:
+        rows = []
+    finally:
+        c.close()
+    return [{'id': r[0], 'ts': r[1], 'name': r[2], 'note': r[3] or '',
+             'fname': r[4] or '', 'kb': r[5] or 0, 'rows': r[6] or 0,
+             'models': r[7] or 0, 'ok': r[8], 'done': r[9],
+             'has_file': bool(r[10])} for r in rows]
+
+
+def get_feedback(fid):
+    try:
+        c = _conn()
+    except Exception:
+        return None
+    try:
+        r = c.execute("""select id,ts,uid,name,sid,note,fname,kb,rows,models,
+                                ok,log_txt,report,file,done
+                         from feedback where id=?""", (int(fid),)).fetchone()
+    except Exception:
+        r = None
+    finally:
+        c.close()
+    if not r:
+        return None
+    return {'id': r[0], 'ts': r[1], 'uid': r[2], 'name': r[3], 'sid': r[4],
+            'note': r[5] or '', 'fname': r[6] or '', 'kb': r[7] or 0,
+            'rows': r[8] or 0, 'models': r[9] or 0, 'ok': r[10],
+            'log': r[11] or '', 'report': r[12] or '', 'file': r[13] or '',
+            'done': r[14]}
+
+
+def mark_feedback(fid, done=1):
+    try:
+        c = _conn()
+        try:
+            c.execute('update feedback set done=? where id=?', (int(done), int(fid)))
+            c.commit()
+        finally:
+            c.close()
+        return True
+    except Exception:
+        return False
+
+
+def pending_feedback():
+    try:
+        c = _conn()
+        try:
+            r = c.execute('select count(*) from feedback where done=0').fetchone()
+        finally:
+            c.close()
+        return int(r[0] or 0)
+    except Exception:
+        return 0

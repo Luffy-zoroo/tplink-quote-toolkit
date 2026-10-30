@@ -25,11 +25,22 @@ crm_eol_result.md
 # 实际落在 %USERPROFILE%\.workbuddy\tplink-toolkit\ ，正常不会进仓库；
 # 这里兜底，防止有人在仓库根目录跑过之后误提交。
 users.json
+logins.json
 usage.db
 *.db
 *.sqlite
 web_pass.txt
 webapp.log
+
+# ===== 内网穿透客户端（本机装、不入库）=====
+# config.ini / authtoken 等于隧道钥匙；客户端二进制体积大，都不入库
+natapp/config.ini
+natapp/natapp.exe
+natapp/natapp
+natapp/*.log
+cloudflared.exe
+*.cloudflared.json
+tunnel-credentials*.json
 
 # 例外：技能自带的分类规则词库，必须提交
 !skills/tplink-quote-autofill/scripts/items_nat.json

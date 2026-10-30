@@ -8,6 +8,7 @@
 """
 import json
 import os
+import re
 import sys
 import time
 
@@ -17,6 +18,42 @@ import tpkit_config as cfg  # noqa: E402
 # 选型备份库走配置；未配置时落到 ~/.workbuddy/tplink-toolkit/data/ 下
 DEFAULT_STORE = cfg.data_path('dealer_backup_json')
 STORE_VERSION = 1
+
+
+def plain_desc(s):
+    """HTML 描述 → 一行可读文本。
+
+    为什么需要：官网 `spotlight` 字段是 `<ul><li>…</li></ul>` 原文，
+    直接存下来会变成「<ul> / <li> / 最高分辨率…」。`--fast fill` 走的就是官网，
+    2026-10-30 全量重抓时把 2255 条原本干净的平台描述洗成了 HTML，才发现没做清洗。
+
+    规则：块级/列表元素先换成占位符（最后统一变 ' / '），其余标签去掉，
+    实体反转义，连续空白压成一个空格。
+
+    ⚠️ 分隔符必须走占位符，不能直接拿正则把「空白+斜杠+空白」压成 ' / '——
+       描述里本来就有 `1/2.8英寸`、`DC/PoE`、`-30℃~60℃` 这种值，那样会把
+       `1/2.8英寸` 改写成 `1 / 2.8英寸`，参数直接变错。
+    """
+    if not s:
+        return ''
+    t = str(s)
+    if '<' not in t and '&' not in t:
+        return t.strip()          # 本来就是纯文本，一个字都别动
+    SEP = '\x00'
+    # 块级/列表元素前后插分隔符，避免相邻两条句子上下一粘
+    t = re.sub(r'(?i)<\s*(br|/li|/p|/div|/tr|/h[1-6])\s*/?>', SEP, t)
+    t = re.sub(r'(?i)<\s*li[^>]*>', SEP, t)
+    t = re.sub(r'<[^>]+>', '', t)
+    t = (t.replace('&nbsp;', ' ').replace('&amp;', '&').replace('&lt;', '<')
+          .replace('&gt;', '>').replace('&quot;', '"').replace('&#39;', "'"))
+    t = re.sub(r'[ \t\r\n\u3000]+', ' ', t)
+    # 占位符连同两侧空白一起收成一个 ' / '（要用 [\s\x00]* 一次吃完，
+    # 分两步做会在 `</li>` 与 `<li>` 之间留下两个空格）
+    t = re.sub(r'\s*\x00[\s\x00]*', ' / ', t)
+    # 原文里偶有不成对的 '<'（如「IPv6<」后面跟着换行），清洗后紧贴分隔符，去掉；
+    # 但「<2min」「VSWR:<1.25」这种是真值，后面紧跟数字，不能动
+    t = re.sub(r'\s*<\s*(?=/|$)', ' ', t)
+    return t.strip(' /').strip()
 
 
 def _empty():
@@ -93,6 +130,8 @@ def make_record(row, detail=None, official=None):
     spec = flatten_spec(official.get('specification2') or official.get('specification'))
     if not spec:
         spec = flatten_spec(detail.get('specification'))
+    _pdesc = plain_desc((detail.get('productDesc') or '').strip())
+    _ospot = plain_desc((official.get('spotlight') or '').strip())
     rec = {
         'model': detail.get('productModel') or row.get('productModel'),
         'name': detail.get('productName') or row.get('productName'),
@@ -105,12 +144,13 @@ def make_record(row, detail=None, official=None):
         'dealerProductType': detail.get('dealerProductType', row.get('dealerProductType')),
         'price_untrusted': detail.get('price') if detail.get('price') is not None else row.get('price'),
         'boxNumber': detail.get('boxNumber', row.get('boxNumber')),
-        'halt': detail.get('haltProduct'),
-        'desc': ((detail.get('productDesc') or '').strip()
-                 or (official.get('spotlight') or '').strip() or None),
-        'desc_from': ('platform' if (detail.get('productDesc') or '').strip()
-                      else ('official' if (official.get('spotlight') or '').strip() else None)),
-        'spotlight': (official.get('spotlight') or '').strip() or None,
+        # 平台停产标记只作观察，命名上就和 `halt` 分开：
+        # `halt` 是权威口径，只由 enrich.py crm 按 CRM lifeCycle 写入。
+        # 2026-10-30 踩过：平台这个值恒为 False，由它写 `halt` 会把 CRM 判的停产覆盖掉。
+        'halt_platform': detail.get('haltProduct'),
+        'desc': (_pdesc or _ospot or None),
+        'desc_from': ('platform' if _pdesc else ('official' if _ospot else None)),
+        'spotlight': (_ospot or None),
         'spec': spec,
         'official_url': ('https://www.tp-link.com.cn/product_%s.html' % official['productId']
                          if official.get('productId') else None),

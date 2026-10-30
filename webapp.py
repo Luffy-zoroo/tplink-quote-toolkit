@@ -7,23 +7,29 @@
 浏览器打开 http://<这台机的 IP>:8000 就能用，什么都不用装。
 
 用法：
-    python webapp.py                    # 监听 0.0.0.0:8000，首次自动生成口令并记住
+    python webapp.py                    # 监听 0.0.0.0:8000
     python webapp.py --port 8080        # 换端口
-    python webapp.py --pass 口令         # 指定口令（会覆盖记住的那个）
-    python webapp.py --no-pass          # 不要口令（只在自己电脑上调试时用）
-    python webapp.py --host 127.0.0.1   # 只允许本机
+    python webapp.py --no-pass          # 跳过登录（只在自己电脑上调试时用）
+
+登录（2026-10-29 起）：
+    打开网页必须先填**自己的 CRM 邮箱 + 密码**，服务端拿它去 CRM 真登一次，
+    验过才发会话 cookie。不填就什么都看不到 —— 这就是"鉴权"。
+    会话落盘（logins.json），服务崩溃自动重启不会把所有人踢下线。
 
 长期跑在分部机器上：双击 启动.bat 即可（崩溃自动重启），
-开机自启和口令管理见 部署-内网.md。
+外网访问 / 内网穿透（NATAPP / 花生壳）见 外网访问-内网穿透.md。
 
 流程分两段（和命令行版一致）：
     ① 上传清单 → 服务自动探测列位 → 你确认探测对不对
     ② 确认后才真填，填完给下载链接
 
-安全边界：
-    · 文件只落在本机临时目录，处理完（或超时）自动删
-    · 不联网、不上传任何数据到外部；只有"算价格"会连公司 CRM
-    · 只给组网内的人用，不要做端口映射到公网
+安全边界（挂公网前必须读，别只看"能跑通"）：
+    · 文件落在本机临时目录，处理完（或超时）自动删；**用户点「反馈」才会留一份**，
+      且页面上写明"会把这次上传的清单副本一起发给我"。
+    · 只在"算价格"时连公司 CRM。
+    · 密码加密存在这台机器上（DPAPI）。**被攻破 = 所有同事的 CRM 密码一起泄露**，
+      不是"只能查价格" —— 攻击者拿到密码可以直接去 CRM 用，权限和同事本人一样。
+      所以 admin 页的「查看凭据」在公网模式下会被强制关掉（见 ADMIN_CRED_LOCAL_ONLY）。
 """
 
 import os
@@ -33,6 +39,7 @@ import sys
 import json
 import time
 import uuid
+import ssl
 import shutil
 import random
 import socket
@@ -40,8 +47,11 @@ import tempfile
 import threading
 import subprocess
 import argparse
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs, quote
+from urllib.parse import urlparse, parse_qs, quote, urlencode
+from urllib.request import getproxies
 
 try:
     import openpyxl
@@ -57,58 +67,229 @@ import webapp_users as WU          # 多用户 + 使用统计（同目录，不�
 # ---------------------------------------------------------------- 配置
 
 MAX_UPLOAD = 20 * 1024 * 1024      # 单文件上限 20 MB
-SESSION_TTL = 3 * 3600             # 会话 3 小时
+SESSION_TTL = 3 * 3600             # 上传会话（确认页 → 填表）保留 3 小时
 WORK_DIR = os.path.join(tempfile.gettempdir(), 'tpkit_web')
-ACCESS_PASS = ''                   # 由 --pass 设置，未设则自动生成并落盘
+
+# ---- 登录 ----
+REQUIRE_LOGIN = True               # --no-pass 时置 False（本机调试）
+LOGIN_TTL = 30 * 86400             # 勾了"保持登录"：30 天
+LOGIN_TTL_SHORT = 12 * 3600        # 没勾：12 小时
+FAIL_MAX = 5                       # 同一个"账号+IP"连续错几次就锁
+FAIL_WIN = 600                     # 统计窗口（秒）
+FAIL_LOCK = 600                    # 锁多久（秒）
+_login_fail = {}                   # key -> [次数, 首次时间, 锁到时间]
+_login_lock = threading.Lock()
+# 公网模式下「查看凭据」是否还允许：默认允许，但经穿透/代理访问时强制只认本机
+ADMIN_CRED_LOCAL_ONLY = True
+
 _sessions = {}                     # sid -> dict
 _lock = threading.Lock()
 
+
+def fmt_kb(kb):
+    """KB 数 → 人能看的字串。穿透线路按月算流量，这事得看得见。"""
+    try:
+        kb = float(kb or 0)
+    except Exception:
+        return '0 KB'
+    if kb <= 0:
+        return '0 KB'
+    if kb < 1024:
+        return '%d KB' % round(kb)
+    if kb < 1024 * 1024:
+        return '%.1f MB' % (kb / 1024.0)
+    return '%.2f GB' % (kb / 1024.0 / 1024.0)
+
 # 口令 / 日志放在用户目录，不在仓库里，也不随技能重装丢
 STATE_DIR = os.path.join(os.path.expanduser('~'), '.workbuddy', 'tplink-toolkit')
-PASS_FILE = os.path.join(STATE_DIR, 'web_pass.txt')
 LOG_FILE = None                    # 由 --log 设置
 
 
-def load_or_make_pass(explicit):
-    """口令持久化：第一次随机生成，之后每次启动都读同一个。
+def client_ip(h):
+    """真实来源 IP。
 
-    为什么要持久化：分部那台机器会重启，如果每次口令都变，
-    同事存的书签全部失效，等于每次都要重新发链接。
+    NATAPP / 花生壳 / nginx 这类穿透走的是本机回环，`client_address` 永远是 127.0.0.1。
+    它们通常会加 X-Forwarded-For / X-Real-IP，有就取第一个。
+    注意：这个头客户端可以伪造，只用于"看个大概"和粗限速，
+    **不要**拿它做安全判断（真做判断就会被人绕过去）。
     """
-    if explicit:
-        return explicit
+    for name in ('X-Forwarded-For', 'X-Real-IP'):
+        v = (h.headers.get(name) or '').strip()
+        if v:
+            return v.split(',')[0].strip()[:60]
+    return (h.client_address[0] if h.client_address else '') or ''
+
+
+def _ip_private(ip):
+    """是不是内网/本机地址。"""
+    p = (ip or '').split('.')
+    if len(p) != 4:
+        return False
     try:
-        if os.path.exists(PASS_FILE):
-            with io.open(PASS_FILE, encoding='utf-8') as f:
-                v = f.read().strip()
-            if v:
-                return v
+        a, b = int(p[0]), int(p[1])
     except Exception:
-        pass
-    v = ''.join(random.choice('abcdefghjkmnpqrstuvwxyz23456789') for _ in range(6))
+        return False
+    return (a == 127 or a == 10
+            or (a == 192 and b == 168)
+            or (a == 172 and 16 <= b <= 31)
+            or (a == 100 and 64 <= b <= 127))     # 100.64/10 = 运营商/组网网段
+
+
+def is_external(h):
+    """这次请求是不是从"外网"进来的。
+
+    判据是 Host：域名 → 外网；IP 且是内网段 → 内网。
+    这个判断很粗，但用对了地方就够：它只用来决定"能不能看明文密码"，
+    默认拒绝，误判成外网只是多一步限制，不会多开一个口子。
+    """
+    host = (h.headers.get('Host') or '').split(':')[0].strip().lower()
+    if not host:
+        return False
+    if host in ('localhost', '127.0.0.1', '::1'):
+        return False
+    if re.match(r'^\d{1,3}(\.\d{1,3}){3}$', host):
+        return not _ip_private(host)
+    return True          # 域名 / 穿透给的二级域名 → 当外网处理
+
+
+def _safe_next(nxt):
+    """登录后跳哪：只允许站内路径。
+
+    必须同时挡掉 `//evil.com` —— 它 startswith('/')，但浏览器会当成
+    协议相对地址跳到外站，是个标准的开放重定向。
+    """
+    nxt = (nxt or '/').strip()
+    if not nxt.startswith('/') or nxt.startswith('//') or nxt.startswith('/\\'):
+        return '/'
+    return nxt
+
+
+def _fail_state(key):
+    """→ (是否被锁, 还要锁多少秒)"""
+    with _login_lock:
+        v = _login_fail.get(key)
+        if not v:
+            return False, 0
+        now = time.time()
+        if v[2] and v[2] > now:
+            return True, int(v[2] - now)
+        return False, 0
+
+
+def _fail_add(key):
+    """记一次登录失败；窗口内连续 FAIL_MAX 次就锁 FAIL_LOCK 秒。"""
+    now = time.time()
+    with _login_lock:
+        v = _login_fail.get(key) or [0, now, 0]
+        if now - v[1] > FAIL_WIN:
+            v = [0, now, 0]
+        v[0] += 1
+        if v[0] >= FAIL_MAX:
+            v[2] = now + FAIL_LOCK
+        _login_fail[key] = v
+        # 防止字典无限长（有人拿垃圾邮箱刷）
+        if len(_login_fail) > 500:
+            for k in [k for k, x in _login_fail.items()
+                      if now - x[1] > FAIL_WIN and not x[2]]:
+                _login_fail.pop(k, None)
+
+
+def _fail_clear(key):
+    with _login_lock:
+        _login_fail.pop(key, None)
+
+
+_CRM_BASE = None
+
+
+def crm_base():
+    """CRM 根地址。复用技能的 tpkit_config，代码里不写死任何内网域名。"""
+    global _CRM_BASE
+    if _CRM_BASE is not None:
+        return _CRM_BASE
+    _CRM_BASE = ''
+    script = find_autofill()
+    dirs = []
+    if script:
+        dirs.append(os.path.dirname(script))
+    dirs.append(os.path.join(os.path.expanduser('~'), '.workbuddy', 'skills',
+                             'tplink-crm-readonly', 'scripts'))
+    for d in dirs:
+        if not os.path.exists(os.path.join(d, 'tpkit_config.py')):
+            continue
+        try:
+            if d not in sys.path:
+                sys.path.insert(0, d)
+            import tpkit_config as C
+            _CRM_BASE = C.require_base('crm_base', 'CRM')
+            break
+        except Exception:
+            continue
+    return _CRM_BASE
+
+
+def crm_login(email, pwd):
+    """拿这组账号密码**真登一次** CRM。返回 (ok, 中文名, 部门, 错误说明)。
+
+    这是登录鉴权的核心：不是本地比对一个哈希，而是让 CRM 自己说"这人对不对"。
+    CRM 登录没有验证码，所以服务端可以直接代登。
+    """
+    base = crm_base()
+    if not base:
+        return False, '', '', ('这台机器没配 CRM 地址（crm_base），没法验证账号。'
+                               '让维护的人先跑一遍 生成配置.py。')
+    url = base.rstrip('/') + '/api/login'
+    req = urllib.request.Request(
+        url, data=urlencode({'email': email, 'password': pwd}).encode(),
+        headers={'Content-Type': 'application/x-www-form-urlencoded',
+                 'User-Agent': 'Mozilla/5.0'})
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE      # 内网自签证书，和技能里的做法一致
+    op = urllib.request.build_opener(
+        urllib.request.ProxyHandler(getproxies()),
+        urllib.request.HTTPSHandler(context=ctx))
     try:
-        os.makedirs(STATE_DIR, exist_ok=True)
-        with io.open(PASS_FILE, 'w', encoding='utf-8', newline='\n') as f:
-            f.write(v + '\n')
+        raw = op.open(req, timeout=25).read().decode('utf-8', 'replace')
+    except urllib.error.HTTPError as e:
+        msg = ''
+        try:
+            msg = (e.read() or b'').decode('utf-8', 'replace')[:160]
+        except Exception:
+            pass
+        # 4xx = 账号密码不对；其它码 = 服务端/网关问题，措辞必须分开，
+        # 否则同事会一直以为是自己密码错
+        if e.code in (400, 401, 403):
+            return False, '', '', '账号或密码不对'
+        return False, '', '', 'CRM 返回 %s %s' % (e.code, msg)
     except Exception as e:
-        sys.stderr.write('口令存不下来（%s），本次用临时口令\n' % e)
-    return v
+        return False, '', '', '连不上 CRM（%s）。' % e
+    try:
+        j = json.loads(raw)
+    except Exception:
+        return False, '', '', 'CRM 回的不是 JSON，可能被网关拦了'
+    s = (j.get('sessionInfo') or {}) if isinstance(j, dict) else {}
+    name = (s.get('chineseName') or '').strip()
+    if not name:
+        m = ''
+        if isinstance(j, dict):
+            m = j.get('msg') or j.get('message') or j.get('error') or ''
+        return False, '', '', str(m or '账号或密码不对')[:120]
+    return True, name, (s.get('officeName') or '').strip(), ''
 
 
 _TLS = threading.local()            # 当前请求是谁（每个请求线程各存一份）
 
 
 def qk():
-    """URL 上带当前身份的查询串。
+    """URL 上带身份的查询串 —— 现在恒为空。
 
-    **必须按"当前请求的人"取 token，不能用全局口令** —— 每人一条链接、
-    各自用自己的 CRM 账号，如果这里返回维护者的口令，别人点一下链接
-    就会被当成管理员（提权）。所以用 thread-local 存当前 token。
+    2026-10-29 改：身份不再是 `?k=` 链接，而是登录后的会话 cookie。
+    "链接即身份"有个致命问题：链接谁拿到都能用，转一次就等于共享账号，
+    而且链接会留在聊天记录里。现在必须用 CRM 账号密码登录。
+    保留函数名只是因为几十处 `"/run" + qk()` 的拼接不想全翻一遍。
     """
-    tok = getattr(_TLS, 'token', '')
-    if tok:
-        return '?k=' + tok
-    return ('?k=' + ACCESS_PASS) if ACCESS_PASS else ''
+    return ''
 
 
 def _write_log(line):
@@ -392,6 +573,10 @@ def janitor():
         for sid, s in list(_sessions.items()):
             if now - s['ts'] > SESSION_TTL:
                 drop_session(sid)
+        try:
+            WU.purge_logins()          # 顺手清过期登录会话
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------- multipart
@@ -612,11 +797,33 @@ summary{font-size:14px;color:#1a56db;cursor:pointer;font-weight:600}
 .alts b{color:#7f1d1d}
 .alts code{background:#fff;border:1px solid #fecaca;border-radius:4px;
  padding:1px 5px;font-size:12.5px}
+/* 本次耗时/用量：4 格数字条，手机上两列 */
+.pbar.small .pi{padding:8px 10px}
+.pbar.small .pi b{font-size:15px}
+.pbar.small .pi span{font-size:11.5px}
+/* 登录页 */
+.loginbox{max-width:420px;margin:6vh auto 0}
+.loginbox h1{font-size:22px}
+.loginbox .card{padding:22px}
+.remember{display:flex;align-items:center;gap:9px;margin:14px 0 0;font-weight:400;font-size:14px;color:#374151}
+.remember input{width:18px;height:18px;margin:0;flex:0 0 auto}
+/* 反馈 */
+.fbnote{background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:9px 11px;
+ font-size:12.5px;color:#92400e;line-height:1.65;margin:8px 0}
+.fbnote b{color:#7c2d12}
+.fbitem{border:1px solid #eef0f3;border-radius:10px;padding:10px 12px;margin-top:10px;background:#fcfcfd}
+.fbitem h4{margin:0 0 3px;font-size:14px;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.fbitem .t{font-size:11.5px;color:#9ca3af;margin-left:auto;font-weight:400}
+.fbitem .n{font-size:13px;color:#374151;line-height:1.65;word-break:break-word;
+ display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#ef4444}
 @media (max-width:440px){                          /* 手机窄屏：并排的控制改成上下 */
  .row{flex-direction:column;gap:0}
  .card{padding:16px}
+ .loginbox{margin-top:3vh}
 }
 """
+
 
 
 # ---------------------------------------------------------------- 定价口径（项目机 / 渠道机 分档）
@@ -778,7 +985,7 @@ function busy(f){
 
 
 def tabs(cur, q=''):
-    """顶部切换：上传清单 / 查单个型号。q 是 ?k=口令。"""
+    """顶部切换：上传清单 / 查单个型号。q 保留形参，现在恒为空（身份走 cookie）。"""
     items = (('up', '/', '上传清单'), ('one', '/one', '查单个型号'))
     return '<div class="tabs">%s</div>' % ''.join(
         '<a href="%s%s" class="%s">%s</a>'
@@ -786,65 +993,94 @@ def tabs(cur, q=''):
 
 
 def bar(u, q=''):
-    """身份条：谁在用、CRM 账号绑没绑、管理员多一个「使用情况」。"""
+    """身份条：谁在用、CRM 账号、管理入口、退出。"""
     if not u:
         return ''
     bits = ['<span class="tag">%s</span>' % esc(u.get('name') or '')]
-    if u.get('email'):
-        bits.append('<a href="/me%s">CRM：%s</a>' % (q, esc(u.get('email'))))
-    else:
-        bits.append('<a href="/me%s">没绑 CRM 账号，点这里填</a>' % q)
+    em = (u.get('email') or '').strip()
+    bits.append('<a href="/me">%s</a>' % (('CRM：' + esc(em)) if em else 'CRM 账号'))
     if u.get('role') == 'admin':
-        bits.append('<a href="/admin%s">使用情况</a>' % q)
+        n = WU.pending_feedback()
+        bits.append('<a href="/admin">使用情况%s</a>'
+                    % (('（%d 条新反馈）' % n) if n else ''))
+    bits.append('<a href="/logout">退出</a>')
     return '<div class="who">%s</div>' % '<span class="sep">・</span>'.join(bits)
 
 
+def login_body(email='', err='', nxt='/', notice=''):
+    """登录页。就两栏：CRM 邮箱 + 密码。没有注册、没有找回密码。"""
+    tip = '<div class="err">%s</div>' % esc(err) if err else ''
+    return """
+<div class="loginbox">
+<h1>清单填参数</h1>
+<div class="sub">用你自己的 CRM 账号登录，别人替不了你</div>
+%s%s
+<div class="card">
+  <form method="post" action="/login">
+    <input type="hidden" name="next" value="%s">
+    <label>CRM 邮箱</label>
+    <input type="text" name="email" value="%s" placeholder="你的 CRM 登录邮箱"
+           autocomplete="username" autocapitalize="off" spellcheck="false" required>
+    <label>CRM 密码</label>
+    <input type="password" name="pwd" value="" placeholder="你的 CRM 登录密码"
+           autocomplete="current-password" required>
+    <label class="remember">
+      <input type="checkbox" name="keep" value="1" checked>
+      <span>保持登录 30 天（不勾就 12 小时后重新登录）</span>
+    </label>
+    <button class="btn" type="submit">登录</button>
+  </form>
+</div>
+<div class="card" style="font-size:13px;color:#6b7280;line-height:1.75">
+  · 账号密码会拿去<b>真登一次 CRM</b>，验过才放你进来，所以不存在"随便填个邮箱就能用"<br>
+  · 密码会加密存在这台机器上 —— 算价格时必须拿它替你登录 CRM，不留就查不了价<br>
+  · 输错 5 次会锁 10 分钟（防别人拿你的邮箱试密码）
+</div>
+</div>
+""" % (tip, notice, esc(nxt or '/'), esc(email))
+
+
 def me_body(u, q='', msg=''):
-    """「我的」：绑自己的 CRM 账号。绑一次，之后就不用再输。"""
+    """「我的」：登录账号、改记住的密码、退出。"""
     email, has_pwd = (u.get('email') or ''), bool(u.get('pwd'))
-    host = getattr(_TLS, 'host', '') or '这台机的IP:8000'
-    link = ('http://%s/%s' % (host, q)) if q else ('http://%s/' % host)
-    pwd_note = ('<div class="ok">已记住密码（加密存在这台机器上），下面留空就是不改。</div>'
+    host = getattr(_TLS, 'host', '') or ''
+    link = ('http://%s/' % host) if host else '(当前访问的网址)'
+    pwd_note = ('<div class="ok">密码已记住（加密存在这台机器上），下面留空就是不改。</div>'
                 if has_pwd else
-                '<div class="hint">还没记住密码 —— 每次算价格都要重新输。</div>')
+                '<div class="hint">没记住密码 —— 下次算价格会失败，重新登录一次就好。</div>')
     weak = ''
     if has_pwd and WU.mem_level() == 'weak':
         weak = ('<div class="warn">这台机用不了 Windows 加密接口，密码是<b>弱加密</b>存的。'
-                '能登录这台电脑的人可以解出来，别把服务开到公网。</div>')
+                '能登录这台电脑的人可以解出来。</div>')
     return """
 %s<h1>我的</h1>
-<div class="sub">这是你自己的 CRM 账号，只用来替你算价</div>
-%s
+<div class="sub">登录身份就是你的 CRM 账号</div>
+%s%s%s
 <div class="card">
-  <label>我的 CRM 账号（用你自己的，别用别人的）</label>
-  <form method="post" action="/me/save%s">
-    <input type="text" name="email" value="%s" placeholder="你的 CRM 登录邮箱" autocomplete="username">
-    <label>密码</label>
-    <input type="password" name="pwd" value="" placeholder="%s" autocomplete="current-password">
-    <label style="display:flex;gap:8px;align-items:center;margin-top:10px">
-      <input type="checkbox" name="remember" value="1" %s style="width:18px;height:18px;flex:0 0 auto">
-      <span>记住密码，下次不用再输</span>
-    </label>
-    <label style="display:flex;gap:8px;align-items:center;margin-top:6px">
-      <input type="checkbox" name="forget" value="1" style="width:18px;height:18px;flex:0 0 auto">
-      <span>删掉已记住的密码（下次要重新输）</span>
-    </label>
-    <div class="hint">密码用 Windows 加密接口存在<b>维护者这台机器</b>上，只用来替你登录 CRM，
-      换台机器或换 Windows 账户就解不开。不想留了，勾下面的「删掉已记住的密码」再保存。</div>
-    <div class="warn">要如实说一句：密码是加密存的，但<b>维护者（发你链接的人）能解出来看</b>，
-      因为服务就是在他这台机上跑。介意的话就别勾「记住密码」，每次自己输。</div>
-    <button class="btn" type="submit">保存</button>
-  </form>
-</div>
-<div class="card">
-  <div class="kv"><span>我的访问链接</span><b class="mono">%s</b></div>
+  <div class="kv"><span>登录账号</span><b class="mono">%s</b></div>
+  <div class="kv"><span>访问地址</span><b class="mono">%s</b></div>
   <div class="kv"><span>用过的次数</span><b>%s 次</b></div>
   <div class="kv"><span>最近一次</span><b>%s</b></div>
 </div>
-""" % (bar(u, q), msg + pwd_note + weak, q, esc(email),
-       '已记住，留空不改' if has_pwd else '输入密码',
-       'checked' if has_pwd else 'checked',
-       esc(link, 120), int(u.get('runs') or 0), esc(u.get('last') or '还没用过'))
+<div class="card">
+  <label>改一下记住的密码（CRM 里改过密码后才需要）</label>
+  <form method="post" action="/me/save">
+    <input type="text" name="email" value="%s" placeholder="CRM 登录邮箱"
+           autocomplete="username">
+    <label>新密码</label>
+    <input type="password" name="pwd" value="" placeholder="%s"
+           autocomplete="current-password">
+    <div class="hint">密码用 Windows 加密接口存在<b>维护者这台机器</b>上，
+      只用来替你登录 CRM，换台机器或换 Windows 账户就解不开。</div>
+    <div class="warn">如实说一句：密码是加密存的，但<b>维护者能解出来看</b>，
+      因为服务就是在他这台机上跑。介意的话就别让他开公网，或者每次用完让他清掉。</div>
+    <button class="btn" type="submit">保存</button>
+  </form>
+</div>
+<a class="btn gray" href="/logout">退出登录</a>
+""" % (bar(u, q), msg, pwd_note, weak, esc(email or '—'), esc(link, 120),
+       int(u.get('runs') or 0), esc(u.get('last') or '—'),
+       esc(email), '已记住，留空不改' if has_pwd else '输入密码')
 
 
 def cred_body(u, q, info, msg=''):
@@ -892,94 +1128,158 @@ def cred_body(u, q, info, msg=''):
        esc(info.get('last') or '—'), pwd_html, esc(lvl), q, q, esc(info.get('id')))
 
 
-def admin_body(u, q, users, stats, recs, msg='', host=''):
-    """管理员：发链接、看谁在用、导 CSV。"""
+def admin_body(u, q, users, stats, recs, msg='', host='', fbs=None, fb_open=0):
+    """管理员：谁在用、用了多少、反馈了什么。"""
     base = 'http://%s/' % (host or '这台机的IP:8000')
     blocks = []
     for x in users:
-        tok = x.get('token') or ''
-        link = base + '?k=' + tok
         on = x.get('active', True)
         blocks.append(
             '<div class="ub">'
             '<h4>%s%s<span class="st%s">%s</span></h4>'
             '<div class="lk">%s</div>'
-            '<div class="meta">CRM：%s ・ 最近：%s ・ 次数：%s</div>'
+            '<div class="meta">最近登录：%s ・ 操作 %s 次 ・ 建档：%s</div>'
             '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">'
             '<a class="btn gray" style="width:auto;padding:8px 14px;font-size:13px" '
-            'href="/admin/cred%s&amp;uid=%s">查看 CRM 凭据</a>'
+            'href="/admin/cred&amp;uid=%s">查看 CRM 凭据</a>'
             '%s</div>'
             '</div>' % (
                 esc(x.get('name') or ''),
                 ' <span class="tag">管理员</span>' if x.get('role') == 'admin' else '',
                 '' if on else ' off', '在用' if on else '已停用',
-                esc(link, 120), esc(x.get('email') or '未绑'),
+                esc(x.get('email') or '没登录过，还没有邮箱'),
                 esc(x.get('last') or '—'), int(x.get('runs') or 0),
-                q, esc(x.get('id') or ''),
+                esc(x.get('created') or '—'), esc(x.get('id') or ''),
                 '' if x.get('id') == (u or {}).get('id') else
-                ('<form method="post" action="/admin/toggle%s" style="display:inline;margin:0">'
+                ('<form method="post" action="/admin/toggle" style="display:inline;margin:0">'
                  '<input type="hidden" name="uid" value="%s">'
                  '<button class="btn gray" type="submit" '
                  'style="width:auto;padding:8px 14px;font-size:13px">%s</button></form>'
-                 % (q, esc(x.get('id') or ''), '停用' if on else '启用'))))
+                 % (esc(x.get('id') or ''), '停用' if on else '启用'))))
     prow = []
     for p in stats.get('people') or []:
         prow.append('<tr><td class="nw">%s</td><td class="num">%s</td><td class="num">%s</td>'
+                    '<td class="num">%s</td><td class="num">%s</td><td class="num">%s</td>'
                     '<td class="num">%s</td><td class="num">%s</td><td class="nw">%s</td></tr>' % (
                         esc(p['name']), p['n'], p['rows'], p['models'],
-                        p['secs'], esc(p['last'])))
+                        '%.1f' % (p['run_s'] or 0), '%.2f' % (p['up_s'] or 0),
+                        '%.2f' % (p['pa_s'] or 0), fmt_kb(p['kb']), esc(p['last'])))
     rrow = []
     for r in recs:
         rrow.append('<tr><td class="mono nw">%s</td><td class="nw">%s</td><td class="nw">%s</td>'
                     '<td class="num">%s</td><td class="num">%s</td><td class="num">%s</td>'
-                    '<td>%s</td></tr>' % (
+                    '<td class="num">%s</td><td class="num">%s</td><td>%s</td></tr>' % (
                         esc(r['ts']), esc(r['name'] or ''), WU.kind_cn(r['kind']),
                         r['rows'] or 0, r['models'] or 0,
-                        ('%.1f' % (r['secs'] or 0)), esc(r.get('note') or '')))
+                        ('%.1f' % (r['secs'] or 0)),
+                        ('%.2f' % (r['up_secs'] or 0)) if r.get('up_secs') else '—',
+                        ('%d' % (r['kb'] or 0)) if r.get('kb') else '—',
+                        esc(r.get('note') or '')))
+    fbh = []
+    for f in (fbs or []):
+        fbh.append(
+            '<div class="fbitem">'
+            '<h4>%s%s<span class="tag">#%d</span><span class="t">%s</span></h4>'
+            '<div class="n">%s</div>'
+            '<div class="meta">清单：%s ・ %d 行 ・ %s%s</div>'
+            '<a class="btn gray" style="width:auto;padding:7px 13px;font-size:13px;'
+            'display:inline-block" href="/admin/fb&amp;id=%d">看详情 / 下载原件</a>'
+            '</div>' % (
+                esc(f.get('name') or ''), '' if f.get('done') else ' <span class="dot"></span>',
+                f.get('id') or 0, esc(f.get('ts') or ''),
+                esc((f.get('note') or '(没写说明)')[:220]),
+                esc(f.get('fname') or '—'), f.get('rows') or 0,
+                fmt_kb(f.get('kb') or 0),
+                '' if f.get('has_file') else ' ・ <b>没留原件</b>',
+                f.get('id') or 0))
     t = stats.get('total') or {}
     return """
 %s<h1>使用情况</h1>
-<div class="sub">链接发给谁，谁的点算谁的；这里看得到用量</div>
+<div class="sub">谁登录过、跑了多少、反馈了什么</div>
+%s
 %s
 <div class="card">
-  <label>加一个人（自动生成专属链接，发给他就行）</label>
-  <form method="post" action="/admin/new%s">
-    <input type="text" name="name" placeholder="姓名，比如 张三" required>
-    <button class="btn" type="submit">生成链接</button>
+  <label>反馈（%d 条待看）</label>
+  %s
+  <div class="hint">用户点「结果有问题」时会把那次的清单副本和运行记录一起留在这里，
+    点开能下载原件、看他当时填了什么。</div>
+</div>
+<div class="card">
+  <label>人（%d 个）</label>
+  %s
+  <form method="post" action="/admin/new" style="margin-top:14px">
+    <div class="row">
+      <div><input type="text" name="name" placeholder="姓名" required></div>
+      <div><input type="text" name="email" placeholder="CRM 邮箱" required></div>
+    </div>
+    <button class="btn" type="submit">预先建档</button>
+    <div class="hint">不建也行 —— 他用 CRM 账号登录一次就自动出现。
+      预先建档只是为了先把姓名写对，别在列表里显示成邮箱前缀。</div>
   </form>
 </div>
 <div class="card">
-  <label>用户（%d 人）</label>
-  %s
-  <div class="hint">链接 = 身份。谁丢了链接就找你要，别互相转发别人的链接。</div>
-</div>
-<div class="card">
-  <label>汇总：共 %s 次操作 ・ %s 行清单 ・ %s 个型号</label>
+  <label>汇总：共 %s 次操作 ・ %s 行清单 ・ 上传 %s</label>
   <div style="overflow-x:auto">
   <table class="tb">
-    <tr><th>用户</th><th class="num">次数</th><th class="num">清单行数</th>
-        <th class="num">型号数</th><th class="num">平均耗时</th><th>最近</th></tr>
-    %s
+    <tr><th>用户</th><th class="num">次数</th><th class="num">行数</th>
+        <th class="num">型号</th><th class="num">均处理</th><th class="num">均接收</th>
+        <th class="num">均解析</th><th class="num">文件量</th><th>最近</th></tr>
     %s
   </table>
   </div>
-  <a class="btn gray" href="/admin/usage.csv%s">导出全部记录 CSV</a>
+  <a class="btn gray" href="/admin/usage.csv">导出全部记录 CSV</a>
 </div>
 <div class="card">
   <label>最近 40 条</label>
   <div style="overflow-x:auto">
   <table class="tb">
     <tr><th>时间</th><th>用户</th><th>动作</th><th class="num">行数</th>
-        <th class="num">型号</th><th class="num">耗时s</th><th>备注</th></tr>
+        <th class="num">型号</th><th class="num">处理s</th><th class="num">接收s</th>
+        <th class="num">KB</th><th>备注</th></tr>
     %s
   </table>
   </div>
 </div>
-""" % (bar(u, q), msg, q, len(users),
-       ''.join(blocks) or '<div class="hint">还没有人</div>',
-       t.get('n', 0), t.get('rows', 0), t.get('models', 0), ''.join(prow),
-       '' if not prow else '', q, ''.join(rrow) or
-       '<tr><td colspan="7">还没有记录</td></tr>')
+<div class="hint" style="margin-top:-4px">对外地址：%s</div>
+""" % (bar(u, q), msg, '' if not fb_open else
+       '<div class="warn">有 %d 条新反馈还没看。</div>' % fb_open,
+       fb_open, ''.join(fbh) or '<div class="hint">还没有人反馈</div>',
+       len(users),
+       ''.join(blocks) or '<div class="hint">还没有人登录过</div>',
+       t.get('n', 0), t.get('rows', 0), fmt_kb(t.get('kb')),
+       ''.join(prow) or '<tr><td colspan="9">还没有记录</td></tr>',
+       ''.join(rrow) or '<tr><td colspan="9">还没有记录</td></tr>',
+       esc(base, 120))
+
+
+def feedback_body(u, sid, ctx='', fname='', kb=0, rows=0, ok=True, msg=''):
+    """「结果有问题」的反馈页。写明会上传什么，不偷偷留。"""
+    quota = ''
+    if kb:
+        quota = ('<div class="kv"><span>这次的文件</span><b>%s</b></div>'
+                 '<div class="kv"><span>清单行数</span><b>%d 行</b></div>'
+                 % (fmt_kb(kb), rows or 0))
+    return """
+%s<h1>反馈这次结果</h1>
+<div class="sub">说一句哪里不对就行，不用写长</div>
+%s
+<div class="card">
+  %s
+  <form method="post" action="/feedback">
+    <input type="hidden" name="sid" value="%s">
+    <input type="hidden" name="ctx" value="%s">
+    <label>哪里有问题？</label>
+    <textarea name="note" rows="5" placeholder="比如：TL-IPC544FP-W4 的参数里少了音频编码；H3 的价格不对，应该是 3.4 折"></textarea>
+    <div class="fbnote"><b>提交会把这次的东西一起留给我：</b>
+      清单副本（%s）、运行日志、每行的命中情况。
+      别的清单不会带，只有这一次。</div>
+    <button class="btn" type="submit">提交</button>
+  </form>
+  <a class="btn gray" href="/">算了，返回</a>
+</div>
+""" % (bar(u, ''), msg, quota, esc(sid or ''),
+       esc(ctx or '', 4000), esc(fname) if fname else '这次没有文件')
+
 
 
 def find_one_query():
@@ -1166,7 +1466,7 @@ def one_body(msg='', q='', models='', with_price=True):
 
 
 def upload_body(msg='', q=''):
-    """上传页。q 是 URL 上要带的 ?k=口令。"""
+    """上传页。q 保留形参，现在恒为空（身份走 cookie）。"""
     return f"""
 {tabs('up', q)}
 <h1>清单填参数</h1>
@@ -1255,9 +1555,19 @@ def confirm_body(s):
     else:
         pmsg = '<div class="tip">没勾「同时算价格」，口径不影响这次结果。</div>'
 
+    stat_html = ('<div class="card"><div class="pbar small">'
+                 '<div class="pi"><span>文件大小</span><b>%s</b></div>'
+                 '<div class="pi"><span>传上来</span><b>%.1fs</b></div>'
+                 '<div class="pi"><span>打开文件</span><b>%.2fs</b></div>'
+                 '<div class="pi"><span>认出型号</span><b>%d 行</b></div>'
+                 '</div></div>'
+                 % (fmt_kb(s.get('kb')), s.get('recv_secs') or 0,
+                    s.get('parse_secs') or 0, s['nrows']))
+
     return f"""
 <h1>确认列位</h1>
 <div class="sub">{esc(s['fname'], 40)} ・ 共 {s['nrows']} 行数据 ・ 工作表 {esc(s['sheet'])}</div>
+{stat_html}
 {notes}
 <div class="card">
   <div class="kv"><span>认出多少行型号</span>
@@ -1307,10 +1617,16 @@ def confirm_body(s):
 """
 
 
-def result_body(s, ok, log, elapsed, report=None):
+def result_body(s, ok, log, elapsed, report=None, stat=None):
+    """填完的结果页。
+
+    stat 里是"这次干了多少活"：文件多大、收文件花了多久、处理多久、命中多少。
+    用户提过穿透线路有流量限制，所以这些数字必须摆在页面上，不能只躺在后台。
+    """
+    stat = stat or {}
     advice = ''
     if ok:
-        head = ('<h1>填好了</h1><div class="sub">用时 %.1f 秒</div>' % elapsed)
+        head = '<h1>填好了</h1><div class="sub">生成好了，往下滑下载</div>'
         dl = '<a class="btn" href="/dl/%s%s">下载填好的清单</a>' % (s['sid'], qk())
         if 'CRM 登录失败' in (log or ''):
             advice = ('<div class="warn"><b>CRM 没登进去，价格一行都没填</b><br>'
@@ -1325,12 +1641,34 @@ def result_body(s, ok, log, elapsed, report=None):
         dl = ''
     # 停产排在最前面：型号是废的，参数来源对不对已经不重要了
     note = (halt_note(report) + param_source_note(report)) if ok else ''
+
+    kb = stat.get('kb') or 0
+    recv = stat.get('recv') or 0
+    parse = stat.get('parse') or 0
+    total = (recv or 0) + (parse or 0) + (elapsed or 0)
+    hit, web, none = stat.get('hit') or 0, stat.get('web') or 0, stat.get('none') or 0
+    np = stat.get('nprice') or 0
+    stats_html = """
+<div class="card">
+  <label>这次的时间与流量</label>
+  <div class="pbar small">
+    <div class="pi"><span>文件大小</span><b>%s</b></div>
+    <div class="pi"><span>传上来</span><b>%.1fs</b></div>
+    <div class="pi"><span>处理</span><b>%.1fs</b></div>
+    <div class="pi"><span>合计</span><b>%.1fs</b></div>
+  </div>
+  <div class="kv"><span>清单行数</span><b>%d 行</b></div>
+  <div class="kv"><span>参数：控标库 / 官网 / 没查到</span><b>%d / %d / %d</b></div>
+  <div class="kv"><span>价格填了</span><b>%d 行</b></div>
+  <div class="hint">「传上来」是服务端收完整个文件的耗时，包含网络传输；
+    文件越大、网越慢，这段越长。走内网穿透时这段还会受那条线路的带宽限制。</div>
+</div>
+""" % (fmt_kb(kb), recv, elapsed or 0, total,
+       s.get('nrows') or 0, hit, web, none, np)
+
     return """
 %s
-<div class="card">
-  <div class="kv"><span>文件</span><b>%s</b></div>
-  <div class="kv"><span>处理行数</span><b>%d 行</b></div>
-</div>
+%s
 %s
 %s
 %s
@@ -1338,12 +1676,13 @@ def result_body(s, ok, log, elapsed, report=None):
   <label>处理记录</label>
   <pre>%s</pre>
 </div>
-<div class="tip">这份清单有没有要调整的？<br>
-参数不准 / 缺 ★ 加分项 / 价格口径不对，都直接跟维护的人说一句，会改进规则。<br>
-规则改了以后，下次同样的清单就不会再犯。</div>
+<div class="tip">觉得哪里填得不对？点下面这个，把这次的东西直接留给我 ——
+参数不准、缺 ★、价格口径不对，都能改规则，下次就对了。</div>
+<a class="btn gray" href="/feedback?sid=%s">结果有问题，反馈一下</a>
 <a class="btn gray" href="/">再传一份</a>
-""" % (head, s['fname'], s['nrows'], dl, advice, note,
-       (log or '(无输出)').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;'))
+""" % (head, stats_html, dl, advice, note,
+       (log or '(无输出)').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;'),
+       quote(s['sid']))
 
 
 def err_body(msg, sid=''):
@@ -1546,14 +1885,6 @@ class H(BaseHTTPRequestHandler):
         self.send_header('Content-Type', ctype)
         self.send_header('Content-Length', str(len(data)))
         self.send_header('Cache-Control', 'no-store')
-        # 身份 token 从 URL 验过一次，就把响应里的 cookie 种上：
-        # 页面里「开始填」「下载」「返回」这些链接/表单原来不带 ?k=，
-        # 一点就被弹回「需要口令」。种了 cookie 之后后续请求全都过。
-        tok = (getattr(self, 'user', None) or {}).get('token') or ''
-        if tok and getattr(self, '_grant', False):
-            self.send_header('Set-Cookie',
-                             'tpkit_k=%s; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax'
-                             % tok)
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
@@ -1563,51 +1894,91 @@ class H(BaseHTTPRequestHandler):
             pass
 
     def _page(self, title, body, code=200, sid='', refresh=None):
-        """渲染整页，自动带上顶部身份条（谁在用 / 绑没绑 CRM / 管理入口）。"""
+        """渲染整页，自动带上顶部身份条（谁在用 / 管理入口 / 退出）。"""
         return self._send(code, page(title, bar(self.user, qk()) + body, sid, refresh))
+
+    def _cookie(self, name):
+        """从 Cookie 头里取一个值（标准库没有解析器，手工拆够用）。"""
+        for part in (self.headers.get('Cookie') or '').split(';'):
+            k, _, v = part.strip().partition('=')
+            if k == name:
+                return v.strip()
+        return ''
+
+    def _cookie_hdr(self, sid, days):
+        """种会话 cookie。经 HTTPS 访问时加 Secure，免得明文线路把 cookie 泄了。"""
+        secure = ((self.headers.get('X-Forwarded-Proto') or '').lower() == 'https'
+                  or self.headers.get('X-Forwarded-Scheme', '').lower() == 'https')
+        return ('tpkit_s=%s; Path=/; Max-Age=%d; HttpOnly; SameSite=Lax%s'
+                % (sid, int(days * 86400), '; Secure' if secure else ''))
 
     def _auth_ok(self):
         """解析身份 → self.user。
 
-        一个 token 就是一个人的身份，链接即身份（同事打开链接就能用，不用记账号）。
-        token 放 /admin 里生成，管理员发给谁，谁的点就算谁的。
+        身份来自登录会话（cookie tpkit_s），而会话只能通过 CRM 账号密码验证拿到。
+        老版本的 `?k=` 链接**不再有任何作用** —— 链接是能转发的，转发就等于共享账号。
         """
         self.user = None
-        self._grant = False
         _TLS.token = ''
-        if not ACCESS_PASS:
+        _TLS.host = self.headers.get('Host') or ''
+        _TLS.user = None
+        if not REQUIRE_LOGIN:
             self.user = {'id': '', 'name': '本机调试', 'role': 'admin',
                          'token': '', 'active': True, 'email': '', 'pwd': ''}
+            _TLS.user = self.user
             return True
-        tok = parse_qs(urlparse(self.path).query).get('k', [''])[0]
-        if not tok:
-            for part in (self.headers.get('Cookie') or '').split(';'):
-                name, _, val = part.strip().partition('=')
-                if name == 'tpkit_k':
-                    tok = val.strip()
-                    break
-        u = WU.by_token(tok)
+        sid = self._cookie('tpkit_s')
+        if not sid:
+            return False
+        rec = WU.by_login(sid)
+        if not rec:
+            return False
+        u = WU.by_id(rec.get('uid') or '')
         if not u or not u.get('active', True):
             return False
         self.user = u
-        self._grant = True
-        _TLS.token = u.get('token') or ''
-        _TLS.host = self.headers.get('Host') or ''
+        self._sid = sid
+        _TLS.user = u
         return True
 
-    def _deny(self):
-        self._send(403, page('链接不对',
-                             '<h1>链接不对</h1><div class="err">这条链接无效或已被停用，'
-                             '向维护的人要一条新的。</div>'
-                             '<div class="hint">链接里的 <span class="mono">?k=</span> '
-                             '就是你的身份，<b>一个人一条</b>，别互相转发。</div>'))
+    def _to_login(self):
+        """没登录 → 302 到登录页，带上原本要去的地址。
+
+        POST 不读请求体直接回，所以必须关连接，否则下一个请求会读到半个包。
+        """
+        nxt = self.path if self.command == 'GET' else '/'
+        self.close_connection = True
+        self._send(302, b'', 'text/plain',
+                   {'Location': '/login?next=' + quote(nxt, safe='')})
 
     # ---- GET ----
     def do_GET(self):
         u = urlparse(self.path)
         path = u.path
+
+        if path == '/login':
+            # 已经登录了就别再显示登录页（也不能跳回 /login，那会死循环）
+            if self._auth_ok():
+                return self._send(302, b'', 'text/plain',
+                                  {'Location': _safe_next((parse_qs(u.query).get('next')
+                                                           or ['/'])[0])})
+            return self._login_page(parse_qs(u.query))
+
+        if path == '/logout':
+            sid = self._cookie('tpkit_s')
+            if sid:
+                rec = WU.by_login(sid)
+                if rec:
+                    me = WU.by_id(rec.get('uid') or '') or {}
+                    WU.log(me.get('id'), me.get('name'), 'logout',
+                           ip=client_ip(self))
+                WU.drop_login(sid)
+            return self._send(302, b'', 'text/plain',
+                              {'Location': '/login',
+                               'Set-Cookie': 'tpkit_s=; Path=/; Max-Age=0; HttpOnly'})
+
         if not self._auth_ok():
-            return self._deny()
+            return self._to_login()
 
         if path == '/':
             return self._page('清单填参数', upload_body('', qk()))
@@ -1618,10 +1989,13 @@ class H(BaseHTTPRequestHandler):
         if path == '/me':
             return self._send(200, page('我的', me_body(self.user, qk())))
 
+        if path == '/feedback':
+            return self._feedback_page(parse_qs(u.query))
+
         if path == '/admin':
             if (self.user or {}).get('role') != 'admin':
                 return self._send(403, page('没有权限', err_body(
-                    '这一页只有维护者能看。要用自己的链接正常算清单，回首页就行。')))
+                    '这一页只有维护者能看。要算清单回首页就行。')))
             return self._admin_page()
 
         if path == '/admin/cred':
@@ -1629,6 +2003,16 @@ class H(BaseHTTPRequestHandler):
                 return self._send(403, page('没有权限', err_body(
                     '这一页只有维护者能看。')))
             return self._admin_cred(parse_qs(u.query))
+
+        if path == '/admin/fb':
+            if (self.user or {}).get('role') != 'admin':
+                return self._send(403, page('没有权限', err_body('只有维护者能看。')))
+            return self._admin_fb(parse_qs(u.query))
+
+        if path == '/admin/fb/file':
+            if (self.user or {}).get('role') != 'admin':
+                return self._send(403, page('没有权限', err_body('只有维护者能取。')))
+            return self._admin_fb_file(parse_qs(u.query))
 
         if path == '/admin/usage.csv':
             if (self.user or {}).get('role') != 'admin':
@@ -1658,14 +2042,26 @@ class H(BaseHTTPRequestHandler):
     # ---- POST ----
     def do_POST(self):
         u = urlparse(self.path)
-        if not self._auth_ok():
-            return self._deny()
-
         n = int(self.headers.get('Content-Length') or 0)
-        if n > MAX_UPLOAD + 1024 * 1024:
+        if n > MAX_UPLOAD + 2 * 1024 * 1024:
             return self._send(413, page('文件太大',
                                         err_body('文件超过 20 MB，请精简后再传。')))
+
+        # 登录必须在鉴权之前，否则登录页自己都进不去
+        if u.path == '/login':
+            t0 = time.time()
+            body = self.rfile.read(n)
+            self._recv_secs = time.time() - t0
+            return self._on_login(body)
+
+        if not self._auth_ok():
+            return self._to_login()
+
+        # 收请求体的耗时 = "文件传上来花了多久"（服务端视角，含网络传输）
+        t0 = time.time()
         body = self.rfile.read(n)
+        self._recv_secs = time.time() - t0
+        self._body_len = n
 
         if u.path == '/upload':
             return self._on_upload(body)
@@ -1677,90 +2073,184 @@ class H(BaseHTTPRequestHandler):
             return self._on_one(body)
         if u.path == '/me/save':
             return self._on_me_save(body)
+        if u.path == '/feedback':
+            return self._on_feedback(body)
         if u.path == '/admin/new':
             return self._on_admin_new(body)
         if u.path == '/admin/toggle':
             return self._on_admin_toggle(body)
+        if u.path == '/admin/fb/done':
+            return self._on_fb_done(body)
         return self._send(404, page('404', err_body('页面不存在')))
+
+    # ---- 登录 ----
+    def _login_page(self, f, err='', email=''):
+        nxt = _safe_next((f.get('next') or ['/'])[0])
+        return self._send(200, page('登录', login_body(email, err, nxt)))
+
+    def _on_login(self, body):
+        """用 CRM 账号密码登录。真的去 CRM 登一次，登不上就不放行。"""
+        f = parse_qs(body.decode('utf-8', 'replace'), keep_blank_values=True)
+
+        def g(k):
+            v = f.get(k)
+            return (v[0] if v else '') or ''
+
+        email = g('email').strip().lower()
+        pwd = g('pwd')                       # 密码原样，不 strip（前后空格可能是密码的一部分）
+        keep = g('keep') == '1'
+        nxt = _safe_next(g('next'))
+        if not email or not pwd:
+            return self._login_page(f, '邮箱和密码都要填。', email)
+
+        ip = client_ip(self)
+        # 两个键一起记：按 IP 防同一台机器乱试，按邮箱防换 IP 绕过
+        # （X-Forwarded-For 是客户端能伪造的，只按 IP 限速等于没限）
+        keys = [ip + '|' + email, '*|' + email]
+        for k in keys:
+            locked, left = _fail_state(k)
+            if locked:
+                return self._login_page(
+                    f, '这个账号连续输错太多次，%d 分钟后再试。' % max(1, left // 60), email)
+
+        u = WU.by_email(email)
+        stored = WU.creds(u)[1] if u else ''
+        if stored and pwd == stored:
+            # 本地比对通过就不再去敲 CRM —— 多个账号同一出口 IP 频繁登录，
+            # 容易被 CRM 当成异常。代价：他在 CRM 里改过密码后，这里还能用旧的登。
+            ok, name, office, err = True, '', '', ''
+        else:
+            ok, name, office, err = crm_login(email, pwd)
+        if not ok:
+            for k in keys:
+                _fail_add(k)
+            WU.log((u or {}).get('id'), (u or {}).get('name'), 'login', ok=0,
+                   ip=ip, note='登录失败：%s' % (err or '')[:80])
+            return self._login_page(f, err or '账号或密码不对', email)
+
+        for k in keys:
+            _fail_clear(k)
+        if not u:
+            u = WU.ensure(email, name)
+        elif name and not (u.get('name') or '').strip():
+            WU.update(u['id'], name=name)
+            u = WU.by_id(u['id'])
+        u = WU.by_id(u.get('id')) or u
+        if not u.get('active', True):
+            return self._login_page(f, '这个账号被停用了，找维护的人开一下。', email)
+
+        # 密码必须留下：算价格时服务端要拿它去登录 CRM。
+        if pwd != stored:
+            WU.set_creds(u['id'], email, pwd, True)
+        days = (LOGIN_TTL if keep else LOGIN_TTL_SHORT) / 86400.0
+        sid = WU.new_login(u['id'], days=days, ip=ip,
+                           ua=self.headers.get('User-Agent') or '')
+        WU.log(u['id'], u.get('name'), 'login', ip=ip,
+               note=(office or '')[:40])
+        return self._send(302, b'', 'text/plain',
+                          {'Location': nxt,
+                           'Set-Cookie': self._cookie_hdr(sid, days)})
 
     # ---- 我的 / 管理 ----
     def _admin_page(self):
         users = WU.load()['users']
         return self._send(200, page('使用情况', admin_body(
             self.user, qk(), users, WU.summary(), WU.recent(40),
-            host=self.headers.get('Host') or '')))
+            host=self.headers.get('Host') or '',
+            fbs=WU.list_feedback(15), fb_open=WU.pending_feedback())))
 
     def _admin_cred(self, f):
-        """看某人的 CRM 凭据。forget=1 就清掉他的密码。"""
+        """看某人的 CRM 凭据。forget=1 就清掉他的密码。
+
+        默认**只允许在本机/内网看**：这是整套系统里唯一会把明文密码吐出来的页面，
+        而它一旦经公网可达，就等于"只要攻破一个管理员会话，所有人密码全拿到"。
+        确实需要远程看，启动时加 --allow-cred-remote。
+        """
+        if ADMIN_CRED_LOCAL_ONLY and is_external(self):
+            return self._send(403, page('这一页只能在局域网看', err_body(
+                '查看明文密码这一页，默认禁止从外网打开。<br>'
+                '在本机上打开 http://127.0.0.1:8000/admin 就能看；'
+                '确实要远程看，启动时加 <span class="mono">--allow-cred-remote</span>。')))
         uid = (f.get('uid') or [''])[0]
         info = WU.reveal(uid)
         if not info.get('id'):
             return self._send(404, page('没这人', err_body('用户不存在，或者刚被删了。')))
         me = self.user or {}
-        ip = self.client_address[0]
+        ip = client_ip(self)
         if (f.get('forget') or [''])[0] == '1':
             WU.update(uid, pwd='')
             WU.log(me.get('id'), me.get('name'), 'viewcred',
                    note='清掉 %s 的密码' % (info.get('name') or uid), ip=ip)
             return self._send(302, b'', 'text/plain',
-                              {'Location': '/admin/cred' + qk() + '&uid=' + quote(uid)})
+                              {'Location': '/admin/cred?uid=' + quote(uid)})
         WU.log(me.get('id'), me.get('name'), 'viewcred',
                note='看了 %s 的凭据' % (info.get('name') or uid), ip=ip)
         return self._send(200, page('CRM 凭据', cred_body(self.user, qk(), info)))
 
     def _on_me_save(self, body):
-        """保存自己的 CRM 账号。密码留空 = 不改；勾了"记住"才落盘。"""
+        """改记住的密码。密码留空 = 只改邮箱/不动密码。"""
         f = parse_qs(body.decode('utf-8', 'replace'), keep_blank_values=True)
 
         def g(k):
             v = f.get(k)
-            return ((v[0] if v else '') or '').strip()
+            return (v[0] if v else '') or ''
 
-        email, pwd = g('email'), g('pwd')
-        remember = g('remember') == '1'
+        email, pwd = g('email').strip().lower(), g('pwd')
         if not email:
             return self._send(400, page('我的', me_body(
-                self.user, qk(), '<div class="err">CRM 账号不能空。</div>')))
+                self.user, qk(), '<div class="err">CRM 邮箱不能空。</div>')))
         uid = (self.user or {}).get('id') or ''
         if not uid:                     # --no-pass 调试模式没有用户记录
             return self._send(400, page('我的', me_body(
-                self.user, qk(), '<div class="err">当前是无口令调试模式，不存账号。</div>')))
-        old = WU.by_id(uid) or {}
-        forget = g('forget') == '1'
-        if forget:
-            WU.update(uid, email=email, pwd='')
-        elif pwd:
-            WU.set_creds(uid, email, pwd, remember)
+                self.user, qk(), '<div class="err">当前是免登录调试模式，不存账号。</div>')))
+        # 换成别人的邮箱 = 冒用，拦住；只允许改自己和没被占用的邮箱
+        other = WU.by_email(email)
+        if other and other.get('id') != uid:
+            return self._send(400, page('我的', me_body(
+                self.user, qk(), '<div class="err">这个邮箱已经是另一个账号了。</div>')))
+        if pwd:
+            ok, name, office, err = crm_login(email, pwd)
+            if ok:
+                WU.set_creds(uid, email, pwd, True)
+                msg = '<div class="ok">已保存，新密码也验证过能登录 CRM。</div>'
+            else:
+                # 验证不过不落盘：否则他下次算价会一直失败却不知道为什么
+                WU.update(uid, email=email)
+                msg = ('<div class="err">CRM 没认这个密码（%s），所以没存。'
+                       '密码确认对了再填一次。</div>' % esc(err))
         else:
-            WU.update(uid, email=email)     # 只改邮箱，密码保持原样
+            WU.update(uid, email=email)
+            msg = '<div class="ok">只更新了邮箱，密码没动。</div>'
         WU.touch(WU.by_id(uid) or {})
         WU.log(uid, (self.user or {}).get('name'), 'bind', ok=1,
-               ip=self.client_address[0])
-        msg = ('<div class="ok">已保存。' +
-               ('已删掉记住的密码，下次要重新输。' if forget else
-                ('密码已记住，下次不用再输。' if (pwd and remember) else
-                 ('密码没记住，下次还要输一次。' if pwd else '只更新了账号，密码没动。'))) +
-               '</div>')
+               ip=client_ip(self))
         self.user = WU.by_id(uid) or self.user
         return self._send(200, page('我的', me_body(self.user, qk(), msg)))
 
     def _on_admin_new(self, body):
         if (self.user or {}).get('role') != 'admin':
             return self._send(403, page('没有权限', err_body('只有维护者能加人。')))
-        f = parse_qs(body.decode('utf-8', 'replace'))
-        name = ((f.get('name') or [''])[0] or '').strip()
-        if not name:
+        f = parse_qs(body.decode('utf-8', 'replace'), keep_blank_values=True)
+
+        def g(k):
+            v = f.get(k)
+            return (v[0] if v else '') or ''
+
+        name, email = g('name').strip(), g('email').strip().lower()
+        if not (name and email):
             return self._admin_page()
-        u = WU.add(name, role='user')
+        if WU.by_email(email):
+            msg = '<div class="warn">这个邮箱已经建过档了，不用再加。</div>'
+        else:
+            WU.add(name, role='user', email=email)
+            msg = ('<div class="ok">已建 <b>%s</b>（%s）。他用自己的 CRM 密码登录一次就进来了。</div>'
+                   % (esc(name), esc(email)))
         WU.log((self.user or {}).get('id'), (self.user or {}).get('name'),
-               'admin', ok=1, ip=self.client_address[0])
-        host = self.headers.get('Host') or ''
-        msg = ('<div class="ok">已加 <b>%s</b>，把这条发给他：<br>'
-               '<span class="mono">http://%s/?k=%s</span></div>'
-               % (esc(name), esc(host), esc(u['token'])))
+               'admin', ok=1, ip=client_ip(self))
         return self._send(200, page('使用情况', admin_body(
             self.user, qk(), WU.load()['users'], WU.summary(), WU.recent(40),
-            msg=msg, host=host)))
+            msg=msg, host=self.headers.get('Host') or '',
+            fbs=WU.list_feedback(15), fb_open=WU.pending_feedback())))
 
     def _on_admin_toggle(self, body):
         if (self.user or {}).get('role') != 'admin':
@@ -1770,7 +2260,157 @@ class H(BaseHTTPRequestHandler):
         u = WU.by_id(uid)
         if u and u.get('id') != (self.user or {}).get('id'):
             WU.update(uid, active=not u.get('active', True))
+            if not u.get('active', True):      # 刚被停用 → 立刻踢下线
+                WU.drop_logins_of(uid)
         return self._admin_page()
+
+    # ---- 反馈 ----
+    def _feedback_page(self, f):
+        sid = (f.get('sid') or [''])[0]
+        ctx = (f.get('ctx') or [''])[0]
+        s = get_session(sid) if sid else None
+        if s:
+            return self._send(200, page('反馈', feedback_body(
+                self.user, sid, ctx=ctx, fname=s.get('fname'),
+                kb=s.get('kb') or 0, rows=s.get('nrows') or 0)))
+        return self._send(200, page('反馈', feedback_body(
+            self.user, '', ctx=ctx)))
+
+    def _on_feedback(self, body):
+        """用户点「结果有问题」→ 留一条反馈，连清单副本一起。"""
+        f = parse_qs(body.decode('utf-8', 'replace'), keep_blank_values=True)
+
+        def g(k):
+            v = f.get(k)
+            return (v[0] if v else '') or ''
+
+        sid, ctx, note = g('sid'), g('ctx'), g('note').strip()
+        if not note:
+            s = get_session(sid) if sid else None
+            return self._send(400, page('反馈', feedback_body(
+                self.user, sid, ctx=ctx, fname=(s or {}).get('fname'),
+                kb=(s or {}).get('kb') or 0, rows=(s or {}).get('nrows') or 0,
+                msg='<div class="err">写一句哪里不对吧，不然我不知道要改什么。</div>')))
+        s = get_session(sid) if sid else None
+        me = self.user or {}
+        fid = WU.add_feedback(
+            me.get('id'), me.get('name'), note, sid=sid,
+            fname=(s or {}).get('fname') or '',
+            kb=(s or {}).get('kb') or 0,
+            rows=(s or {}).get('nrows') or 0,
+            models=(s or {}).get('models') or 0,
+            ok=1 if (s or {}).get('last_ok', 1) else 0,
+            log_txt=(s or {}).get('last_log') or '',
+            report=(s or {}).get('last_report') or ctx,
+            src_path=(s or {}).get('src') or '')
+        WU.log(me.get('id'), me.get('name'), 'feedback', ip=client_ip(self),
+               note='#' + str(fid))
+        if not fid:
+            # 存不进去必须说出来。静默返回"收到了"是最坑的一种假成功。
+            return self._send(500, page('没存上', """
+<h1>没存上</h1>
+<div class="err">这条反馈没写进数据库（可能是文件被占用或者正在重启）。<br>
+你写的内容还在这页上，先别关：<b>%s</b></div>
+<div class="hint">复制上面这段话，直接微信发给维护的人，比等我看后台快。</div>
+<a class="btn gray" href="/">回首页</a>
+""" % esc(note[:1200])))
+        return self._send(200, page('反馈已提交', """
+<h1>收到了</h1>
+<div class="sub">编号 #%d</div>
+<div class="card">
+  <div class="ok">这条反馈连这次的清单副本、运行记录一起留在了后台，
+    我会照着改规则。改完下次同样的清单就不会再犯。</div>
+  <div class="hint">如果这次是急用（马上要交报价），直接微信喊我一声，比等我看后台快。</div>
+</div>
+<a class="btn gray" href="/">回首页</a>
+""" % fid))
+
+    def _admin_fb(self, f):
+        fid = (f.get('id') or ['0'])[0]
+        d = WU.get_feedback(fid or 0)
+        if not d:
+            return self._send(404, page('没有这条', err_body('反馈不存在。')))
+        rep = d.get('report') or ''
+        try:                               # 台账是 JSON，摊成人能读的行
+            arr = json.loads(rep) if rep.strip().startswith('[') else []
+        except Exception:
+            arr = []
+        rows = []
+        for e in arr[:300]:
+            if not isinstance(e, dict):
+                continue
+            rows.append('<tr><td class="num">%s</td><td class="mono">%s</td>'
+                        '<td>%s</td><td>%s</td></tr>'
+                        % (e.get('row') or '', esc(str(e.get('model') or '')),
+                           esc(str(e.get('kind') or '')),
+                           esc(str(e.get('source') or e.get('note') or e.get('final') or ''))))
+        body = """
+<h1>反馈 #%s</h1>
+<div class="sub">%s ・ %s</div>
+<div class="card">
+  <div class="kv"><span>清单</span><b class="mono">%s</b></div>
+  <div class="kv"><span>文件大小</span><b>%s</b></div>
+  <div class="kv"><span>行数 / 型号</span><b>%d / %d</b></div>
+  <div class="kv"><span>状态</span><b>%s</b></div>
+  %s
+</div>
+<div class="card">
+  <label>他写的说明</label>
+  <div style="white-space:pre-wrap;line-height:1.8">%s</div>
+</div>
+%s
+%s
+<a class="btn gray" href="/admin">← 回使用情况</a>
+""" % (d['id'], esc(d.get('name') or ''), esc(d.get('ts') or ''),
+       esc(d.get('fname') or '—'), fmt_kb(d.get('kb')),
+       d.get('rows') or 0, d.get('models') or 0,
+       '已处理' if d.get('done') else '待看',
+       ('<div class="kv"><span>原件</span><b><a href="/admin/fb/file?id=%s">下载他上传的那份</a></b></div>'
+        % d['id']) if d.get('file') else
+       '<div class="hint">这次没留原件（可能是查型号的反馈，或者文件已被清理）。</div>',
+       esc(d.get('note') or ''),
+       ('<div class="card"><label>每行台账</label><div style="overflow-x:auto">'
+        '<table class="tb"><tr><th class="num">行</th><th>型号</th><th>类型</th>'
+        '<th>来源/结果</th></tr>%s</table></div></div>' % ''.join(rows)) if rows else '',
+       ('<div class="card"><label>运行日志</label><pre>%s</pre></div>'
+        % esc(d.get('log') or '(无)')) if d.get('log') else
+       ('<div class="card"><label>他填的内容</label><pre>%s</pre></div>'
+        % esc(rep[:4000])) if rep and not arr else '')
+        if d.get('done'):
+            body += ('<form method="post" action="/admin/fb/done"><input type="hidden"'
+                     ' name="id" value="%s"><input type="hidden" name="done" value="0">'
+                     '<button class="btn gray" type="submit">标记为「待看」</button></form>'
+                     % d['id'])
+        else:
+            body += ('<form method="post" action="/admin/fb/done"><input type="hidden"'
+                     ' name="id" value="%s"><input type="hidden" name="done" value="1">'
+                     '<button class="btn" type="submit">标记已处理</button></form>'
+                     % d['id'])
+        return self._send(200, page('反馈 #%s' % d['id'], bar(self.user, qk()) + body))
+
+    def _admin_fb_file(self, f):
+        fid = (f.get('id') or ['0'])[0]
+        d = WU.get_feedback(fid or 0)
+        p = (d or {}).get('file') or ''
+        if not p or not os.path.exists(p):
+            return self._send(404, page('文件没了', err_body('这份原件已经被删了。')))
+        with open(p, 'rb') as fh:
+            data = fh.read()
+        name = '%s_%s' % (d['id'], os.path.basename(p).split('_', 1)[-1])
+        return self._send(200, data,
+                          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                          {'Content-Disposition':
+                           "attachment; filename*=UTF-8''%s" % quote(name)})
+
+    def _on_fb_done(self, body):
+        if (self.user or {}).get('role') != 'admin':
+            return self._send(403, page('没有权限', err_body('只有维护者能改。')))
+        f = parse_qs(body.decode('utf-8', 'replace'))
+        fid = ((f.get('id') or ['0'])[0] or '0').strip()
+        done = ((f.get('done') or ['1'])[0] or '1') == '1'
+        WU.mark_feedback(fid, 1 if done else 0)
+        return self._send(302, b'', 'text/plain',
+                          {'Location': '/admin/fb?id=' + quote(fid)})
 
     def _on_one(self, body):
         """查单个型号：只读查询，不落文件、不建会话。"""
@@ -1803,8 +2443,8 @@ class H(BaseHTTPRequestHandler):
             if not (creds[0] and creds[1]):
                 return self._send(400, page('先绑 CRM 账号', me_body(
                     self.user, qk(),
-                    '<div class="err">这次要查价格，但你的 CRM 账号还没绑好。'
-                    '在下面填一次，勾上"记住密码"，以后就不用再输。</div>')))
+                    '<div class="err">这次要查价格，但这台机器上没有你的 CRM 密码。'
+                    '在下面填一次（会真的去 CRM 验一遍），以后就不用再输。</div>')))
 
         t0 = time.time()
         d, err = run_one_query(models, with_price, creds)
@@ -1812,6 +2452,8 @@ class H(BaseHTTPRequestHandler):
             return self._send(400, page('查不了', one_body(
                 '<div class="err">%s</div>' % esc(err), qk(), raw, with_price)))
         html = one_result_body(d, qk(), raw, with_price)
+        html += ('<a class="btn gray" href="/feedback?ctx=%s">结果有问题，反馈一下</a>'
+                 % quote('查型号：' + raw[:600]))
         if cut:
             html = ('<div class="warn">一次最多查 %d 个型号，这次只查了前 %d 个。</div>'
                     % (MODEL_MAX, MODEL_MAX)) + html
@@ -1822,7 +2464,7 @@ class H(BaseHTTPRequestHandler):
                kb_hit=sum(1 for x in items if (x.get('src_kind') == 'kb')),
                kb_web=sum(1 for x in items if (x.get('src_kind') == 'web')),
                kb_none=sum(1 for x in items if (x.get('src_kind') == 'none')),
-               ip=self.client_address[0])
+               ip=client_ip(self))
         return self._page('查询结果', html)
 
     def _on_upload(self, body):
@@ -1846,6 +2488,9 @@ class H(BaseHTTPRequestHandler):
         with open(src, 'wb') as fh:
             fh.write(data)
         s['src'] = src
+        s['kb'] = len(data) / 1024.0
+        s['recv_secs'] = float(getattr(self, '_recv_secs', 0) or 0)
+        t_parse = time.time()
 
         try:
             wb = openpyxl.load_workbook(src, data_only=True)
@@ -1882,6 +2527,7 @@ class H(BaseHTTPRequestHandler):
                  cm=best_cols[0], cp=best_cols[1], ck=best_cols[2],
                  notes=best_notes or [], sheet=best_ws.title, heads=best_heads,
                  maxc=max(best_heads) if best_heads else 20,
+                 parse_secs=time.time() - t_parse,
                  preview=preview_rows(best_ws, best_hr, best_cols[0]))
 
         # 两档定价口径：先算一次用于展示，真正取值在 /run 里再读一遍（用户可能改）
@@ -1897,7 +2543,10 @@ class H(BaseHTTPRequestHandler):
         s['outname'] = re.sub(r'\.(xlsx|xlsm)$', '', fname or '清单', flags=re.I) + '_已填.xlsx'
         WU.touch(self.user)
         WU.log((self.user or {}).get('id'), (self.user or {}).get('name'), 'upload',
-               rows=s.get('nrows') or 0, ok=1, ip=self.client_address[0])
+               rows=s.get('nrows') or 0, ok=1, ip=client_ip(self),
+               up_secs=s.get('recv_secs') or 0,
+               parse_secs=s.get('parse_secs') or 0,
+               kb=int(len(data) / 1024))
         return self._page('确认列位', confirm_body(s))
 
     def _on_rehead(self, body):
@@ -1974,8 +2623,8 @@ class H(BaseHTTPRequestHandler):
             if not (creds[0] and creds[1]):
                 return self._send(400, page('先绑 CRM 账号', me_body(
                     self.user, qk(),
-                    '<div class="err">这次要算价格，但你的 CRM 账号还没绑好。'
-                    '在下面填一次，勾上"记住密码"，以后就不用再输。</div>')))
+                    '<div class="err">这次要算价格，但这台机器上没有你的 CRM 密码。'
+                    '在下面填一次（会真的去 CRM 验一遍），以后就不用再输。</div>')))
 
         t0 = time.time()
         ok, log, report = run_fill(s, hr, mc, pc, kc, wp,
@@ -1985,8 +2634,13 @@ class H(BaseHTTPRequestHandler):
 
         # 统计：只记数字（几行、几命中），不记型号原文
         hit = web = none = 0
+        nprice = 0
         seen = set()
         for e in report or []:
+            if e.get('kind') == '价格':
+                if e.get('final'):
+                    nprice += 1
+                continue
             if e.get('kind') != '参数':
                 continue
             m = (e.get('model') or '').strip().upper()
@@ -2000,11 +2654,25 @@ class H(BaseHTTPRequestHandler):
                 none += 1
             else:
                 hit += 1
+        # 留着给「反馈」用：用户点反馈时把这次的日志和台账一起带上
+        s['last_log'] = log or ''
+        s['last_ok'] = 1 if ok else 0
+        s['models'] = len(seen)
+        try:
+            s['last_report'] = json.dumps(report or [], ensure_ascii=False)
+        except Exception:
+            s['last_report'] = ''
         WU.touch(self.user)
         WU.log((self.user or {}).get('id'), (self.user or {}).get('name'), 'run',
                rows=s.get('nrows') or 0, secs=secs, ok=1 if ok else 0,
-               kb_hit=hit, kb_web=web, kb_none=none, ip=self.client_address[0])
-        return self._page('结果', result_body(s, ok, log, secs, report))
+               kb_hit=hit, kb_web=web, kb_none=none, ip=client_ip(self),
+               up_secs=s.get('recv_secs') or 0,
+               parse_secs=s.get('parse_secs') or 0,
+               kb=int((s.get('kb') or 0)))
+        stat = {'kb': s.get('kb') or 0, 'recv': s.get('recv_secs') or 0,
+                'parse': s.get('parse_secs') or 0, 'hit': hit, 'web': web,
+                'none': none, 'nprice': nprice}
+        return self._page('结果', result_body(s, ok, log, secs, report, stat))
 
 
 def _cfg_creds():
@@ -2081,7 +2749,7 @@ class _Server(ThreadingHTTPServer):
 
 
 def main():
-    global ACCESS_PASS, LOG_FILE
+    global LOG_FILE, REQUIRE_LOGIN, ADMIN_CRED_LOCAL_ONLY
     # 行缓冲：双击运行时本来就即时显示，但输出被重定向到文件/管道时
     # 默认是块缓冲，启动横幅会「消失」到进程退出才出现，排查时很误导
     try:
@@ -2089,27 +2757,42 @@ def main():
         sys.stderr.reconfigure(line_buffering=True)
     except Exception:
         pass
-    ap = argparse.ArgumentParser(description='弱电清单报价 · 内网网页版')
+    ap = argparse.ArgumentParser(description='弱电清单报价 · 网页版')
     ap.add_argument('--host', default='0.0.0.0')
     ap.add_argument('--port', type=int, default=8000)
-    ap.add_argument('--pass', dest='pwd', default='', help='访问口令（不填则自动生成并记住）')
-    ap.add_argument('--no-pass', action='store_true', help='不要口令（只在自己电脑上调试时用）')
+    ap.add_argument('--no-pass', action='store_true',
+                    help='跳过登录（只在自己电脑上调试时用，别对外开）')
+    ap.add_argument('--pass', dest='pwd', default='',
+                    help='已废弃：现在用 CRM 账号密码登录，这个参数不再生效')
+    ap.add_argument('--allow-cred-remote', action='store_true',
+                    help='允许从外网打开「查看 CRM 凭据」（默认只允许本机/内网）')
     ap.add_argument('--log', default='', help='日志文件，默认写到用户目录')
     a = ap.parse_args()
 
+    if a.pwd:
+        print('⚠ --pass 已经不用了：现在必须用 CRM 账号密码登录。')
     if a.no_pass:
-        ACCESS_PASS = ''
+        REQUIRE_LOGIN = False
+        print('⚠ --no-pass：谁都能进，不记录身份。只在本机调试时这样开。')
     else:
-        ACCESS_PASS = load_or_make_pass(a.pwd)
-        # 升级迁移：老版本只有一个全局口令，把它建成「管理员」，
-        # CRM 账号沿用配置文件里的 → 维护者自己的链接不用改。
+        REQUIRE_LOGIN = True
         try:
-            if not any(u.get('token') == ACCESS_PASS for u in WU.load()['users']):
-                _em, _pw = _cfg_creds()
-                WU.add('维护者', role='admin', token=ACCESS_PASS,
-                       email=_em, pwd=_pw)
+            if WU.mem_level() == 'weak':
+                print('⚠ 这台机调不到 Windows DPAPI，密码只能弱加密保存。')
+            # 维护者账号：用配置文件里的 CRM 邮箱当管理员。
+            # 没有就自动建一个 name=维护者，第一次登录时按邮箱认领。
+            _em, _pw = _cfg_creds()
+            if _em:
+                _u = WU.by_email(_em)
+                if not _u:
+                    _u = WU.add('维护者', role='admin', email=_em, pwd=_pw)
+                elif _u.get('role') != 'admin' or (_pw and not _u.get('pwd')):
+                    WU.update(_u['id'], role='admin')
+                    if _pw and not _u.get('pwd'):
+                        WU.set_creds(_u['id'], _em, _pw, True)
         except Exception as _e:
-            print('⚠ 用户表初始化失败（不影响使用，只是不记身份）：%s' % _e)
+            print('⚠ 用户表初始化失败（不影响登录，只是没预设管理员）：%s' % _e)
+    ADMIN_CRED_LOCAL_ONLY = not a.allow_cred_remote
 
     LOG_FILE = a.log or os.path.join(STATE_DIR, 'webapp.log')
     try:
@@ -2136,25 +2819,24 @@ def main():
         print('  查是谁占的：netstat -ano | findstr :%d' % a.port)
         print('=' * 60)
         sys.exit(2)                     # 2 = 端口占用，start.bat 见到这个码就不再重启
-    q = ('?k=' + ACCESS_PASS) if ACCESS_PASS else ''
     print('=' * 60)
     print('清单填参数 · 网页版已启动')
     print('=' * 60)
     if a.host in ('0.0.0.0', ''):
         for ip in local_ips():
             kind = _ip_kind(ip)
-            print('  http://%s:%d/%s  %s' % (ip, a.port, q, kind))
-        print('  ↑ 同事用哪个地址，取决于异地组网软件给这台机分配的 IP')
-        print('    组网互通性自测：让同事在手机浏览器直接开上面任意一条')
+            print('  http://%s:%d/  %s' % (ip, a.port, kind))
+        print('  ↑ 同事用哪个地址，取决于组网/穿透给这台机分配的地址')
     else:
         print('  本机打开：http://%s:%d/' % (a.host, a.port))
-    if ACCESS_PASS:
-        print('  你自己的链接：%s' % q)
-        print('  口令：%s（已写进 %%USERPROFILE%%\\.workbuddy\\tplink-toolkit\\web_pass.txt）' % ACCESS_PASS)
-        print('  发链接 / 看谁在用：http://127.0.0.1:%d/admin%s' % (a.port, q))
-        print('  每人一条 /?k= 链接，各用自己的 CRM 账号（/me 里填，加密存本机）')
+    if REQUIRE_LOGIN:
+        print('  登录方式：打开上面的地址 → 填自己的 CRM 邮箱 + 密码')
+        print('  维护者的管理页：http://127.0.0.1:%d/admin（用你自己的账号登进去）' % a.port)
+        print('  查看明文密码只允许本机/内网打开%s'
+              % ('' if ADMIN_CRED_LOCAL_ONLY else '（已放开：--allow-cred-remote）'))
+        print('  外网映射（NATAPP / 花生壳）见 外网访问-内网穿透.md')
     else:
-        print('  ⚠ 未设口令：能访问到这个地址的人都能用。只在调试时这样开。')
+        print('  ⚠ 免登录模式：能访问到这个地址的人都能用，不记录身份。')
     print('  日志：%s' % (LOG_FILE or '未启用'))
     print('  停止：Ctrl+C（开机自启见 部署-内网.md）')
     print('=' * 60)

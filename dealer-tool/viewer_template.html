@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>TP-LINK 选型备份（离线）</title>
 <style>
-  :root{--bg:#f6f7f9;--card:#fff;--line:#e3e6ea;--tx:#1f2329;--tx2:#646a73;--blue:#1f6fb5;--org:#b45309;--red:#c0392b;}
+  :root{--bg:#f6f7f9;--card:#fff;--line:#e3e6ea;--tx:#1f2329;--tx2:#646a73;--blue:#1f6fb5;--org:#b45309;--red:#c0392b;--grn:#15803d;}
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--tx);font:14px/1.6 "Microsoft YaHei","PingFang SC",system-ui,sans-serif}
   header{position:sticky;top:0;z-index:9;background:#fff;border-bottom:1px solid var(--line);padding:12px 20px}
@@ -14,25 +14,34 @@
   .bar{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
   input,select{font:inherit;padding:7px 10px;border:1px solid var(--line);border-radius:6px;background:#fff}
   input#q{flex:1;min-width:240px}
-  main{display:grid;grid-template-columns:320px 1fr;gap:16px;padding:16px 20px;align-items:start}
+  main{display:grid;grid-template-columns:340px 1fr;gap:16px;padding:16px 20px;align-items:start}
   .list{background:#fff;border:1px solid var(--line);border-radius:8px;max-height:calc(100vh - 190px);overflow:auto}
   .item{padding:9px 12px;border-bottom:1px solid var(--line);cursor:pointer}
   .item:hover{background:#f0f6fc}
   .item.on{background:#e8f1fa;border-left:3px solid var(--blue);padding-left:9px}
   .item b{display:block;font-size:13px}
   .item span{color:var(--tx2);font-size:12px}
+  .item .px{color:var(--red);font-size:12px;margin-left:4px}
   .tag{display:inline-block;font-size:11px;padding:1px 6px;border-radius:10px;margin-left:6px;vertical-align:1px}
   .t-ind{background:#fdece3;color:var(--org)}
   .t-chn{background:#eef2f6;color:var(--tx2)}
+  .t-halt{background:#fde2e1;color:var(--red)}
+  .t-warn{background:#fff4d6;color:#8a6100}
+  .t-proj{background:#e8f0fe;color:#1a56b0}
   .detail{background:#fff;border:1px solid var(--line);border-radius:8px;padding:18px 20px;min-height:300px}
   .detail h2{margin:0 0 4px;font-size:18px}
   .sub{color:var(--tx2);font-size:12px;margin-bottom:14px}
   .sec{font-weight:700;color:var(--blue);margin:16px 0 6px;padding-bottom:4px;border-bottom:1px solid var(--line)}
+  .sec .hint{font-weight:400;color:var(--tx2);font-size:12px;margin-left:6px}
   pre{white-space:pre-wrap;word-break:break-word;background:#fafbfc;border:1px solid var(--line);border-radius:6px;padding:10px 12px;margin:0;font:13px/1.7 inherit}
   table{border-collapse:collapse;width:100%;font-size:13px}
   td{border-bottom:1px solid var(--line);padding:6px 8px;vertical-align:top}
   td.k{width:150px;color:var(--tx2);background:#fafbfc;white-space:nowrap}
+  ol.par{margin:0;padding-left:22px}
+  ol.par li{margin:4px 0;line-height:1.7}
   .warn{background:#fff8e6;border:1px solid #ffe1a8;color:#8a6100;border-radius:6px;padding:8px 10px;font-size:12px;margin-top:10px}
+  .big{background:#fde2e1;border:1px solid #f5c2bf;color:var(--red);border-radius:6px;padding:9px 12px;font-size:13px;font-weight:700;margin:12px 0}
+  .warny{background:#fff8e6;border:1px solid #ffe1a8;color:#8a6100;border-radius:6px;padding:9px 12px;font-size:13px;margin:12px 0}
   .empty{color:var(--tx2);padding:40px 0;text-align:center}
   a{color:var(--blue)}
   @media(max-width:900px){main{grid-template-columns:1fr}.list{max-height:260px}}
@@ -46,7 +55,13 @@
     <input id="q" placeholder="搜型号 / 名称 / 品类 / 描述 / 规格，空格分隔=同时满足">
     <select id="cat"><option value="">全部品类</option></select>
     <select id="kind"><option value="">渠道+行业</option><option value="1">仅行业产品</option><option value="0">仅渠道产品</option></select>
-    <select id="sort"><option value="model">按型号</option><option value="cat">按品类</option></select>
+    <select id="lc">
+      <option value="">全部在产状态</option>
+      <option value="ok">只要在产的</option>
+      <option value="warn">停产预警</option>
+      <option value="halt">已停产</option>
+    </select>
+    <select id="sort"><option value="model">按型号</option><option value="price">按现价从低到高</option><option value="cat">按品类</option></select>
   </div>
 </header>
 <main>
@@ -58,11 +73,16 @@
 const P = Object.values(window.__DATA__.products||{});
 const META = window.__DATA__.meta||{};
 document.getElementById('meta').textContent =
-  `来源 $DEALER_BASE（平台价格不真实，已弃用）· 规格取自官网公开接口 · 备份于 ${META.updated||''} · 共 ${P.length} 个型号`;
+  `规格取自官网公开接口 · 在产状态与价格取自 CRM 价格手册 · 列表刷新 ${META.last_refresh||META.updated||''} · CRM ${META.crm_enriched||'未跑'} · 共 ${P.length} 个型号`;
 const catSel = document.getElementById('cat');
 [...new Set(P.map(p=>p.cat1).filter(Boolean))].sort().forEach(c=>{
   const o=document.createElement('option'); o.value=c; o.textContent=c; catSel.appendChild(o);
 });
+function crm(p){ return p.crm||{}; }
+function lcState(p){
+  const l=crm(p).lifecycle;
+  return l==='HALT'?'halt' : l==='HALT_WARNING'?'warn' : l?'ok' : '';
+}
 function hay(p){
   return [p.model,p.name,p.cat1,p.cat2,p.brand,p.desc||'',
           (p.spec||[]).map(s=>s.name+' '+(s.values||[]).join(' ')).join(' ')]
@@ -70,41 +90,109 @@ function hay(p){
 }
 P.forEach(p=>p._h=hay(p));
 let cur=null;
+function lcTag(l){
+  if(l==='halt') return '<span class="tag t-halt">停产</span>';
+  if(l==='warn') return '<span class="tag t-warn">停产预警</span>';
+  return '';
+}
 function render(){
   const q=document.getElementById('q').value.trim().toLowerCase().split(/\s+/).filter(Boolean);
-  const c=catSel.value, k=document.getElementById('kind').value, sort=document.getElementById('sort').value;
+  const c=catSel.value, k=document.getElementById('kind').value,
+        l=document.getElementById('lc').value, sort=document.getElementById('sort').value;
   let rows=P.filter(p=>(!q.length||q.every(w=>p._h.includes(w)))
-    && (!c||p.cat1===c) && (k==='' || String(p.industry?'1':'0')===k));
+    && (!c||p.cat1===c) && (k==='' || String(p.industry?'1':'0')===k)
+    && (!l || lcState(p)===l));
+  const priceOf=p=>{const v=crm(p).price; return typeof v==='number'?v:1e12;};
   rows.sort((a,b)=> sort==='cat'
     ? ((a.cat1||'')+(a.cat2||'')+a.model).localeCompare((b.cat1||'')+(b.cat2||'')+b.model)
+    : sort==='price' ? (priceOf(a)-priceOf(b) || a.model.localeCompare(b.model))
     : a.model.localeCompare(b.model));
   document.getElementById('cnt').textContent = `（命中 ${rows.length} / ${P.length}）`;
   const L=document.getElementById('list');
-  L.innerHTML = rows.length? rows.map((p,i)=>
-    `<div class="item${p===cur?' on':''}" data-m="${esc(p.model)}">
-       <b>${esc(p.model)}<span class="tag ${p.industry?'t-ind':'t-chn'}">${p.industry?'行业':'渠道'}</span></b>
-       <span>${esc(p.name||'')}</span>
-     </div>`).join('') : '<div class="empty">没有匹配的型号</div>';
+  L.innerHTML = rows.length? rows.map(p=>{
+    const pr=crm(p).price;
+    const px=(typeof pr==='number')?`<span class="px">¥${money(pr)}</span>`:'';
+    return `<div class="item${p===cur?' on':''}" data-m="${esc(p.model)}">
+       <b>${esc(p.model)}${lcTag(lcState(p))}${crm(p).is_project_model?'<span class="tag t-proj">项目机</span>':''}<span class="tag ${p.industry?'t-ind':'t-chn'}">${p.industry?'行业':'渠道'}</span></b>
+       <span>${esc(p.name||'')}${px}</span>
+     </div>`;}).join('') : '<div class="empty">没有匹配的型号</div>';
   L.querySelectorAll('.item').forEach(el=>el.onclick=()=>pick(el.dataset.m));
 }
+function money(v){
+  const f=Number(v);
+  if(!isFinite(f)) return String(v);
+  return (f===Math.round(f)? f.toFixed(0) : f.toFixed(2)).replace(/\B(?=(\d{3})+(?!\d))/g,',');
+}
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]))}
+
+function crmBlock(p){
+  const c=crm(p);
+  if(!c.hit){
+    return `<div class="warn">CRM 价格手册里没有这个型号（未入册，或这是套装 / 定制名）—— 在产状态未知，价格无参考值。</div>`;
+  }
+  const rows=[
+    ['在产状态', c.lifecycle_cn || c.lifecycle || '未知'],
+    ['现价', (typeof c.price==='number'? '¥'+money(c.price) : '—')],
+    ['面价', (typeof c.catalog_price==='number'? '¥'+money(c.catalog_price) : '—')],
+    ['批发价', (typeof c.wholesale_price==='number'? '¥'+money(c.wholesale_price) : '—')],
+    ['业务折扣', (c.business_discount==null||c.business_discount==='')? '—' : c.business_discount],
+    ['阶梯价区间', c.line_info || '—'],
+    ['产品标签', (c.label_cn||[]).join(' / ') || '—'],
+    ['产品系列', c.series || '—'],
+    ['适用订单类型', c.order_types || '—'],
+    ['单位 / 装箱', (c.unit||'—')+' / '+(c.box_number==null?'—':c.box_number)],
+    ['取数时间', c.fetched_at || '—'],
+  ];
+  const head = c.lifecycle==='HALT'
+    ? `<div class="big">⛔ CRM 判定已停产 —— 不要往配单清单里放这个型号</div>`
+    : c.lifecycle==='HALT_WARNING'
+      ? `<div class="warny">⚠ CRM 判定为停产预警：现在还能配，但最好先准备好替代型号</div>` : '';
+  return head + `<table>${rows.map(r=>`<tr><td class="k">${esc(r[0])}</td><td>${esc(r[1])}</td></tr>`).join('')}</table>`;
+}
+
+function paramBlock(p){
+  const b=p.param_backup||{};
+  if(b.from_kongbiao){
+    return `<div class="warn">控标库已有这个型号的 <b>${b.count||0}</b> 条参数 —— 配单请用控标库那份（这里不存副本，避免两份口径打架）。</div>`;
+  }
+  if(!b.count){
+    return `<div class="empty" style="padding:16px 0">官网没有这个型号的规格表，也没有控标库参数 —— 需要人工补。</div>`;
+  }
+  return `<div class="warny">⚠ 以下是<b>备用</b>参数：由官网规格自动拼接，未经人工提炼，<b>不是配单首选</b>。官网不知道哪条该标★加分项，所以这里一条加分项都没有。</div>`
+    + `<ol class="par">${(b.items||[]).map(i=>`<li>${esc(String(i.text||'').replace(/^\d+、/,''))}</li>`).join('')}</ol>`;
+}
+
 function pick(m){
   cur=P.find(p=>p.model===m); render();
   const p=cur, d=document.getElementById('detail');
+  const l=lcState(p);
   d.innerHTML=`
-    <h2>${esc(p.model)} <span class="tag ${p.industry?'t-ind':'t-chn'}">${p.industry?'行业产品':'渠道产品'}</span></h2>
+    <h2>${esc(p.model)} ${lcTag(l)} ${crm(p).is_project_model?'<span class="tag t-proj">项目机</span>':''}
+      <span class="tag ${p.industry?'t-ind':'t-chn'}">${p.industry?'行业产品':'渠道产品'}</span></h2>
     <div class="sub">${esc(p.name||'')} ｜ ${esc(p.cat1||'')} / ${esc(p.cat2||'')} ｜ 品牌 ${esc(p.brand||'')}
       ${p.official_url?`｜ <a href="${esc(p.official_url)}" target="_blank">官网页</a>`:''}</div>
+    <div class="sec">CRM 在产与价格<span class="hint">价格是快照，配单必须实时查</span></div>
+    ${crmBlock(p)}
+    <div class="sec">参数<span class="hint">控标库优先，没有才看备用</span></div>
+    ${paramBlock(p)}
     <div class="sec">产品描述</div>
     <pre>${esc(p.desc||'（无）')}</pre>
-    <div class="sec">规格参数（${(p.spec||[]).length} 项）</div>
+    <div class="sec">官网规格（${(p.spec||[]).length} 项）</div>
     ${(p.spec&&p.spec.length)? `<table>${p.spec.map(s=>
         `<tr><td class="k">${esc(s.name)}</td><td>${esc((s.values||[]).join(' / '))}</td></tr>`).join('')}</table>`
-      : '<div class="empty">该型号无规格数据（官网无对应产品页）</div>'}
-    <div class="warn">数据源：普联合作伙伴平台 + 官网公开接口；平台价格不真实，本表不含价格。选型请以端口/带机量/规格为准。</div>`;
+      : '<div class="empty" style="padding:16px 0">该型号官网没有规格表（多为平台专供型号 / 套装 / 配件）</div>'}
+    <div class="warn">数据源：合作伙伴平台 + 官网公开接口 + CRM 价格手册。<b>价格仅供粗判档次，非配单口径</b>；
+      在产状态以 CRM 为准（平台那个 haltProduct 字段基本不更新，实测 2850 个型号里 0 条标记停产）。</div>`;
 }
-['q','cat','kind','sort'].forEach(id=>document.getElementById(id).addEventListener('input',render));
+['q','cat','kind','lc','sort'].forEach(id=>document.getElementById(id).addEventListener('input',render));
 render();
+// 支持用 #型号 或 ?m=型号 直接打开某个型号（便于把链接发给同事 / 自己收藏）
+(function(){
+  const qs = new URLSearchParams(location.search).get('m');
+  const want = decodeURIComponent(qs || location.hash.replace(/^#/, ''));
+  if (want && P.some(p=>p.model===want)) { document.getElementById('q').value=''; pick(want); }
+  else if (want) { document.getElementById('q').value = want; render(); }
+})();
 </script>
 </body>
 </html>

@@ -81,10 +81,13 @@ def load():
     return ps
 
 
-def search(kws, cat=None, brand=None, industry=None, limit=40, kbs=None):
+def search(kws, cat=None, brand=None, industry=None, limit=40, kbs=None,
+           drop_halt=False):
     ps = load()
     out = []
     for m, r in ps.items():
+        if drop_halt and (r.get('crm') or {}).get('lifecycle') == 'HALT':
+            continue
         if cat and cat not in ((r.get('cat1') or '') + '/' + (r.get('cat2') or '')):
             continue
         if brand and r.get('brand') != brand:
@@ -97,8 +100,50 @@ def search(kws, cat=None, brand=None, industry=None, limit=40, kbs=None):
         if kbs and not all(k in b for k in kbs):
             continue
         out.append(r)
-    out.sort(key=lambda r: (r.get('brand') != 'TP', r.get('model') or ''))
+    # 排序：TP 优先 → 停产/停产预警沉到最后（能配的排前面）→ 型号
+    def _rank(r):
+        lc = (r.get('crm') or {}).get('lifecycle')
+        return (r.get('brand') != 'TP', {'HALT': 2, 'HALT_WARNING': 1}.get(lc, 0),
+                r.get('model') or '')
+    out.sort(key=_rank)
     return out[:limit]
+
+
+def crm_line(r):
+    """把 CRM 在产状态 + 参考价压成一行。没有 CRM 数据就明说没有。"""
+    c = r.get('crm') or {}
+    if not c.get('hit'):
+        return '   CRM: 价格手册无此型号（未入册/套装名），停产状态未知'
+    lc = c.get('lifecycle')
+    if lc == 'HALT':
+        st = '⛔ 停产 —— 不要往清单里放'
+    elif lc == 'HALT_WARNING':
+        st = '⚠ 停产预警（还能配，但先想好替代）'
+    else:
+        st = c.get('lifecycle_cn') or '在产'
+    bits = [st]
+    cat, pz = c.get('catalog_price'), c.get('price')
+    if pz is not None:
+        bits.append('现价¥%s' % _money(pz))
+    if cat is not None and cat != pz:
+        bits.append('面价¥%s' % _money(cat))
+    tags = c.get('label_cn') or []
+    if c.get('is_project_model'):
+        bits.append('项目机型')
+    extra = [t for t in tags if t not in ('项目机型',)]
+    if extra:
+        bits.append('/'.join(extra[:3]))
+    if c.get('business_discount') not in (None, ''):
+        bits.append('业务折扣 %s' % c['business_discount'])
+    return '   CRM: ' + ' | '.join(bits)
+
+
+def _money(v):
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    return ('%.0f' % f) if f == int(f) else ('%.2f' % f)
 
 
 def brief(r, keys=None):
@@ -107,7 +152,13 @@ def brief(r, keys=None):
         (r.get('model') or '')[:26], r.get('brand'), '行业' if r.get('industry') else '渠道',
         (r.get('cat1') or '')[:14], (r.get('cat2') or '')[:18], (r.get('name') or '')[:40])
     line2 = '   desc: ' + (r.get('desc') or '').replace('\n', ' / ')[:150]
-    lines = [head, line2]
+    lines = [head, line2, crm_line(r)]
+    # 有控标库参数的，提示首选哪份；只有备用参数的，提醒是备用
+    pb = r.get('param_backup') or {}
+    if pb.get('from_kongbiao'):
+        lines.append('   参数: 控标库有（%d 条，配单首选）' % pb.get('count', 0))
+    elif pb.get('count'):
+        lines.append('   参数: ⚠ 仅备用（官网规格自动拼 %d 条，非配单首选）' % pb['count'])
     if keys:
         for k in keys:
             if k == 'siblings':          # 同系列型号（detail_raw.productGroupList 提取）
@@ -129,6 +180,8 @@ if __name__ == '__main__':
     ap.add_argument('--keys', default='')
     ap.add_argument('--model')
     ap.add_argument('--show', action='store_true')
+    ap.add_argument('--drop-halt', action='store_true',
+                    help='过滤掉 CRM 判定停产的型号（默认不过滤，只是沉到后面并标红）')
     ap.add_argument('--project', default='',
                     help='清单文件名（和 autofill_quote.py 的 --xlsx 用同一个），'
                          '用于交付门禁按项目记账；不填记到 default')
@@ -145,8 +198,10 @@ if __name__ == '__main__':
                              ensure_ascii=False, indent=1))
         sys.exit()
     keys = [k for k in a.keys.split(',') if k]
-    res = search(a.kw, cat=a.cat, brand=a.brand, industry=a.industry, limit=a.limit)
-    print('命中 %d 条（显示前 %d）\n' % (len(res), a.limit))
+    res = search(a.kw, cat=a.cat, brand=a.brand, industry=a.industry, limit=a.limit,
+                 drop_halt=a.drop_halt)
+    print('命中 %d 条（显示前 %d）%s\n'
+          % (len(res), a.limit, '，已过滤停产' if a.drop_halt else ''))
     for r in res:
         print(brief(r, keys))
         print()

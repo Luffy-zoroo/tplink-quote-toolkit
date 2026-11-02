@@ -134,6 +134,7 @@ python ~/.workbuddy/skills/tplink-quote-autofill/scripts/tpkit_config.py
 | 路径有值但文件不存在 | 问他要正确路径；或临时用 `--kb <路径>` 指定先把流程跑通 |
 | 路径有值、文件在、但报数据格式错 | **不是配置问题**，是文件坏了或版本太旧，别改配置 |
 | `crm_base` / `dealer_base` 未配置 | 内部域名，仓库里**没有也不该有**，必须问他或同事，**不许猜、不许编** |
+| `kbs.base` 未配置（用知识库时） | 同上，也是内部域名。只在用 `tplink-kbs-search` 时才需要，不填该技能直接报错退出 |
 
 ### 第 3 步：直接把配置文件写出来（不要让他手抄）
 
@@ -156,6 +157,7 @@ python ~/.workbuddy/skills/tplink-quote-autofill/scripts/tpkit_config.py
   "dealer_base": "",
   "crm": { "email": "", "password": "" },
   "dealer": { "phone": "", "password": "" },
+  "kbs": { "base": "", "user": "", "password": "" },
   "pricing_default": ""
 }
 ```

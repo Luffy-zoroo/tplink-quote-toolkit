@@ -17,6 +17,50 @@
 
 ---
 
+## 2026-11-02 · 新增两个技能：知识库检索 + 图纸算量
+
+**改了什么**
+
+- **新增 `skills/tplink-kbs-search`**：在 KBS 知识库里全文检索方案/案例、下载附件、
+  把方案 PPT 指定页导成 PNG 取官方拓扑图。HTTP 直连，不需要浏览器。
+  三个坑已写进 SKILL.md：登录后**必须先 GET 一次检索页**（跳过这步接口返回空 JSON 且不报错，
+  最容易误判"库里没资料"）；默认 `bond=or` 会把中文拆字，噪音放大两个数量级
+  （实测「防溺水」：或匹配 8558 条，与匹配 69 条）；同一文档的「正文页/附件页」是两条记录，要按 fdId 去重。
+- **新增 `skills/cad-pdf-device-tally`**：从 CAD 图纸统计设备与点位数量。
+  有 `.dwg` 就走 accoreconsole + AutoLISP 直读矢量实体（文字类数值是图纸真值）；
+  只有 PDF（文字已转曲线）时走「高 DPI 局部光栅化 + 读图/OCR + 逐格像素比对」。
+  最关键的一条：**读小字数量格必须 2400 dpi + 局部裁剪**，整页 600 dpi 会把细笔画稀释成
+  「假空白」—— 同一格实测 6 个墨迹像素 vs 局部 152 个，于是整张表全错。
+  ⚠️ accoreconsole 是 AutoCAD 的组成部分，**不随本仓库分发**，用这条路要求本机有正版 AutoCAD。
+- **图纸算量补上「本机没 AutoCAD」的路**：DWG 先用转换器转成 DXF，再用新增的
+  `scripts/dxf_tally.py`（ezdxf）直读矢量实体，**精度与 accoreconsole 同级，不是 OCR 估算**。
+  实测同一份 DWG（4.2 MB）现场转 DXF 后：文字 1022 条、块参照 2720 个、**块名直方图差异 0 条**，
+  与 AutoCAD 直读完全一致。脚本自带 `名*N` / `N*名` / `含N个名` 倍数解析，并自动排除线缆
+  （`4*Cat.5E utp`、`CAT6 x22`）与尺寸/坐标（`600x600 地砖`、`@300*150`）这类假阳性；
+  默认扫**全部空间**（布局里的图签/设备表也算），可导出带坐标的 CSV 做逐层定位。
+  转换器三条路按机器环境自动选：AutoCAD `DXFOUT` → ODA File Converter → LibreDWG。
+- **`tplink-weekly-report` 规则升级**：周报的读者是**主管**，不是用户本人。
+  补上四条硬约束 —— 全篇第三人称客观陈述、不把用户口头指令当内容复述、
+  不写主体不明的「按要求」、内部待办不口语化；并给了交付前 `grep` 自查命令。
+  起因是 11-01 用户原话：「你这个完全就是你交给我的一个周报，而不是我去交给主管的周报」。
+  同时周报改成三大节结构（配单/询价 → 现场配置 → 其他），标题写日期区间、不写"草稿"。
+- **配置新增 `kbs.base`**：知识库站点地址。和其它内部系统一样，**本仓库不内置任何真实域名**，
+  不填该技能直接报错退出并给出填写指引，**不会猜地址**。不用这个技能就不必填。
+- 配置说明四个载体同步更新：`config.example.json`、`tpkit_config.py` docstring、
+  `quote-autofill/SKILL.md` 的「🤖 帮用户配好配置」、以及技能内的 `config.example.json`。
+
+**你要不要动手** 🔴 改了技能内容，`git pull` → `python install.py` → 重启 WorkBuddy。
+要用知识库检索，先在 `~/.workbuddy/tplink-toolkit.config.json` 加：
+
+```json
+"kbs": { "base": "https://kbs.<你的域名>", "user": "you@example.com", "password": "***" }
+```
+
+然后 `python ~/.workbuddy/skills/tplink-kbs-search/scripts/kbs.py login` 验证，输出「登录成功」即通。
+不用这个技能的话什么都不用做。
+
+---
+
 ## 2026-10-30 · 新增 `xlsx_lint.py`：交付前给 xlsx 做结构体检
 
 **改了什么**

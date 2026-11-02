@@ -42,6 +42,13 @@
     "password": ""
   },
 
+  "_kbs": "知识库检索的站点与账号（skills/tplink-kbs-search 用）。base 是本仓库唯一不内置的地址之一，必须按你所在组织填写，末尾不带斜杠；base 留空 → 该技能直接报错退出并给出填写指引，不会猜地址。也可以用环境变量 TP_KBS_BASE / TP_KBS_USER / TP_KBS_PASSWORD 代替。不用这个技能就不必填。",
+  "kbs": {
+    "base": "",
+    "user": "",
+    "password": ""
+  },
+
   "_pricing_default": "默认定价策略（自然语言）。用户当次没说怎么定价时执行它。例：'监控类走片区折扣，其余走总部折扣'。留空 → 每次报价都会问一遍定价策略，不预设。",
   "pricing_default": "",
 

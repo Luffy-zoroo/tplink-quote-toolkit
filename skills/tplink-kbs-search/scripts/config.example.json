@@ -1,0 +1,8 @@
+{
+  "_说明": "复制到 ~/.workbuddy/tplink-toolkit.config.json 或本目录 config.local.json；也可改用环境变量 TP_KBS_BASE / TP_KBS_USER / TP_KBS_PASSWORD。base 必填，不填程序会直接报错而不是猜地址",
+  "kbs": {
+    "base": "https://kbs.<你的域名>",
+    "user": "you@example.com",
+    "password": "***"
+  }
+}

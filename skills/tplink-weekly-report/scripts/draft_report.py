@@ -79,9 +79,10 @@ def main(paths, out_path, date_str, notes):
             md.append(head + f"配单内容：TODO（工作表构成：{'；'.join(parts)}）。"
                              f"TP-LINK 部分估价约 **{e['tp'] / 10000:.1f} 万**（{e['tp']:,.0f} 元）。")
         else:
-            md.append(head + "配单内容：TODO（清单中未取到有效的 TP-LINK 数量与单价，未给出估价，请核对口径）。")
+            md.append(head + "配单内容：TODO（清单中未取到有效的 TP-LINK 数量与单价，未给出估价）。")
         md.append("")
-    md += ["## 其他事项（待补充）", "", "- （配置类事项、跟进中项目等请自行补充/删除）", ""]
+    # 骨架占位一律不用"请自行补充/删除"这类对话口吻，避免漏改后残留在交付稿里
+    md += ["## 其他事项", "", "- （待补，无内容则删除本节）", ""]
 
     with open(out_path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(md))

@@ -1,6 +1,7 @@
 # tplink-quote-toolkit
 
 > 丢一个弱电工程清单 Excel 进来 → 自动**选型**、补**控标参数**、按指定口径算**含税报价**。
+> 顺手还能**读图纸算量**（DWG / PDF）、**在知识库里找方案找案例**。
 > 一套给 WorkBuddy 用的技能，外加一个命令行选型工具。
 
 ---
@@ -27,6 +28,8 @@
 | 🔍 **选型检索** | 在本地选型库里按关键词/品类/规格全文找候选型号，结果直接带**在产状态 + 参考价 + 参数来源** | `dealer-tool/pick.py` |
 | 🔄 **选型库更新** | 拉平台型号 → 官网规格/描述 → CRM 在产状态与三档价 → 拼备用参数 → 出报告 | `dealer-tool/backup.py` / `enrich.py` / `report.py` |
 | 🧭 **官网反查** | 平台没给官网 id 的型号，遍历官网产品 id 建反查表，把规格补回来 | `dealer-tool/official_index.py` |
+| 📚 **查知识库** | 在 KBS 知识库里全文检索方案/案例，下载附件，把方案 PPT 指定页导成 PNG 取官方拓扑图 | `skills/tplink-kbs-search` |
+| 📐 **图纸算量** | 从 DWG 矢量直读或 PDF 高 DPI 光栅化，统计交换机/AP/摄像机/门禁与 TO/TD/TP/TV 点位数量 | `skills/cad-pdf-device-tally` |
 | 🚦 **过停产** | 批量查 CRM 的 `lifeCycle`，分「在产 / 停产预警 / 停产」 | `skills/tplink-crm-eol-check` |
 | 📅 **配单周报** | 登记每天收到的清单，周末自动生成周报草稿 | `skills/tplink-weekly-report` |
 | 🤖 **群里答题** | 把上面的能力接成企业微信售前机器人 | `skills/tplink-presale-bot` |
@@ -95,6 +98,15 @@ python 生成配置.py               # 自动把配置里的数据路径指向�
 
 编辑 `~/.workbuddy/tplink-toolkit.config.json`，填 `crm_base` / `dealer_base` 和账号。
 格式照 `config.example.json` 的注释填。**不填也能用**：参数功能正常，取价会跳过并提示。
+
+用到**知识库检索**（`tplink-kbs-search`）时还要多填一项 `kbs.base`：
+
+```json
+"kbs": { "base": "https://kbs.<你的域名>", "user": "you@example.com", "password": "***" }
+```
+
+`base` **没有默认值，不填会直接报错**——本仓库不内置任何内网地址，也不会去猜。
+不用这个技能就不必填。
 
 **4）自检**：确认装对了再动手
 

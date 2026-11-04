@@ -1,29 +1,23 @@
 {
- "at": "2026-11-03",
+ "at": "2026-11-04",
  "paths": [
   {
-   "count": 37,
+   "count": 34,
    "path": "/Luffy-zoroo/tplink-quote-toolkit",
    "title": "Overview",
    "uniques": 26
   },
   {
-   "count": 4,
-   "path": "/Luffy-zoroo/tplink-quote-toolkit/tree/main/_shared",
-   "title": "/tree/main/_shared",
-   "uniques": 3
-  },
-  {
-   "count": 2,
-   "path": "/Luffy-zoroo/tplink-quote-toolkit/tree/main/dealer-tool",
-   "title": "/tree/main/dealer-tool",
+   "count": 3,
+   "path": "/Luffy-zoroo/tplink-quote-toolkit/tree/main/skills",
+   "title": "/tree/main/skills",
    "uniques": 2
   },
   {
-   "count": 1,
-   "path": "/Luffy-zoroo/tplink-quote-toolkit/blob/main/_shared/tpkit_config.py",
-   "title": "/blob/main/_shared/tpkit_config.py",
-   "uniques": 1
+   "count": 2,
+   "path": "/Luffy-zoroo/tplink-quote-toolkit/tree/main/_shared",
+   "title": "/tree/main/_shared",
+   "uniques": 2
   },
   {
    "count": 1,
@@ -45,17 +39,17 @@
   },
   {
    "count": 1,
-   "path": "/Luffy-zoroo/tplink-quote-toolkit/tree/main/skills",
-   "title": "/tree/main/skills",
+   "path": "/Luffy-zoroo/tplink-quote-toolkit/tree/main/dealer-tool",
+   "title": "/tree/main/dealer-tool",
    "uniques": 1
   }
  ],
  "referrers": [],
  "totals": {
-  "clones_count": 189,
-  "clones_uniques": 84,
-  "views_count": 48,
-  "views_uniques": 26,
+  "clones_count": 149,
+  "clones_uniques": 72,
+  "views_count": 43,
+  "views_uniques": 27,
   "window_days": 14
  }
 }

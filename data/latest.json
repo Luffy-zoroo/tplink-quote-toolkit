@@ -1,11 +1,11 @@
 {
- "at": "2026-11-05",
+ "at": "2026-11-06",
  "paths": [
   {
-   "count": 25,
+   "count": 17,
    "path": "/Luffy-zoroo/tplink-quote-toolkit",
    "title": "Overview",
-   "uniques": 20
+   "uniques": 13
   },
   {
    "count": 2,
@@ -17,12 +17,6 @@
    "count": 1,
    "path": "/Luffy-zoroo/tplink-quote-toolkit/blob/main/部署-内网.md",
    "title": "/blob/main/部署-内网.md",
-   "uniques": 1
-  },
-  {
-   "count": 1,
-   "path": "/Luffy-zoroo/tplink-quote-toolkit/issues",
-   "title": "/issues",
    "uniques": 1
   },
   {
@@ -46,10 +40,10 @@
  ],
  "referrers": [],
  "totals": {
-  "clones_count": 155,
-  "clones_uniques": 77,
-  "views_count": 32,
-  "views_uniques": 21,
+  "clones_count": 159,
+  "clones_uniques": 76,
+  "views_count": 23,
+  "views_uniques": 14,
   "window_days": 14
  }
 }

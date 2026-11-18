@@ -1,17 +1,11 @@
 {
- "at": "2026-11-17",
+ "at": "2026-11-18",
  "paths": [
   {
-   "count": 11,
+   "count": 10,
    "path": "/Luffy-zoroo/tplink-quote-toolkit",
    "title": "Overview",
-   "uniques": 8
-  },
-  {
-   "count": 2,
-   "path": "/Luffy-zoroo/tplink-quote-toolkit/tree/main/skills",
-   "title": "/tree/main/skills",
-   "uniques": 1
+   "uniques": 7
   },
   {
    "count": 1,
@@ -22,10 +16,10 @@
  ],
  "referrers": [],
  "totals": {
-  "clones_count": 126,
+  "clones_count": 118,
   "clones_uniques": 68,
-  "views_count": 14,
-  "views_uniques": 9,
+  "views_count": 11,
+  "views_uniques": 7,
   "window_days": 14
  }
 }

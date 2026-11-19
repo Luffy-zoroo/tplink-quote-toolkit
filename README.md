@@ -31,6 +31,7 @@
 | 📚 **查知识库** | 在 KBS 知识库里全文检索方案/案例，下载附件，把方案 PPT 指定页导成 PNG 取官方拓扑图 | `skills/tplink-kbs-search` |
 | 📐 **图纸算量** | 从 DWG 矢量直读或 PDF 高 DPI 光栅化，统计交换机/AP/摄像机/门禁与 TO/TD/TP/TV 点位数量 | `skills/cad-pdf-device-tally` |
 | 🚦 **过停产** | 批量查 CRM 的 `lifeCycle`，分「在产 / 停产预警 / 停产」 | `skills/tplink-crm-eol-check` |
+| 🛡️ **查保修期** | 按型号查官网保修政策（一年保换 / 一年 / 两年 / 三年 / 不保修），可批量填清单的保修期列 | `skills/tplink-warranty-lookup` |
 | 📅 **配单周报** | 登记每天收到的清单，周末自动生成周报草稿 | `skills/tplink-weekly-report` |
 | 🤖 **群里答题** | 把上面的能力接成企业微信售前机器人 | `skills/tplink-presale-bot` |
 
@@ -483,6 +484,7 @@ tplink-quote-toolkit/
 │   ├── tplink-quote-autofill/   ← 核心：填参数 + 算价
 │   ├── tplink-crm-readonly/     ← CRM 只读取价
 │   ├── tplink-crm-eol-check/    ← 停产核查
+│   ├── tplink-warranty-lookup/  ← 保修期查询
 │   ├── tplink-weekly-report/    ← 配单周报
 │   └── tplink-presale-bot/      ← 企业微信售前机器人
 ├── dealer-tool/                 ← 选型检索（命令行）

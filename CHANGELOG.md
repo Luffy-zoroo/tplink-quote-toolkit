@@ -17,6 +17,31 @@
 
 ---
 
+## 2026-11-19 · 新增保修期查询技能
+
+**改了什么**
+
+- **新增 `skills/tplink-warranty-lookup`**：按型号查 TP-LINK 官方保修政策，输出
+  `一年保换 / 一年保修 / 两年保修 / 三年保修 / 不保修`，带大类/子类；支持多型号、`--like` 列同系列变体、
+  以及 `--xlsx` 批量填清单的保修期列（改前自动 `.bak`、可 `--dry-run` 预览）。
+- 数据源不是抓渲染页，而是官网售后页的前端数据文件
+  `https://service.tp-link.com.cn/static/js/consultData.js`（5000+ 型号，带 `updatetime`）。
+  页面上的搜索框只是前端过滤，抓 HTML 只会得到一坨压平的文本流，定位型号极易错行。
+- 两个坑写进 SKILL.md：`model` 是**嵌套数组**，必须递归拍平（只遍历一层会命中 0 条且不报错）；
+  批量填表要**跳过表头行**（否则「型号」三个字会被当成型号写成「未收录」，把表头冲掉）。
+- 顺手记了两条判读事实：`YLS*` 是 TP-LINK 域联系列（三年保修，不是第二品牌）；
+  综合布线「网线」子类整体 **不保修**（如 `TL-EC6-305`），报清单时别承诺质保。
+- 缓存 7 天（`data/warranty_cache.json`，不入库），`--refresh` 可强制拉最新。
+
+**你要不要动手**
+
+🔴 改了技能内容 → `git pull` → `python install.py` → **重启 WorkBuddy**。
+
+> 批量填 xlsx 需要 openpyxl；默认 python 没装的话用 WorkBuddy 自带环境
+> `~/.workbuddy/binaries/python/envs/default/Scripts/python.exe`，或 `pip install openpyxl`。
+
+---
+
 ## 2026-11-02 · 新增两个技能：知识库检索 + 图纸算量
 
 **改了什么**

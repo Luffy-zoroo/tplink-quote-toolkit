@@ -121,7 +121,8 @@ def main():
         items=[l.strip() for l in open(a.models,encoding='utf-8') if l.strip()]
     else:
         items=[x.strip() for x in a.models.split(',') if x.strip()]
-    post(f"{crm_base()}/api/login", {"email":EMAIL,"password":PASS})
+    _email, _pwd = resolve_creds()
+    post(f"{crm_base()}/api/login", {"email":_email,"password":_pwd})
     lines=["| 序号 | 型号 | CRM结论 | lifeCycle | 依据(精确匹配条目) |",
            "|---|---|---|---|---|"]
     summ={'停产':0,'在产(量产)':0,'停产预警(在产中)':0,'无精确匹配':0}

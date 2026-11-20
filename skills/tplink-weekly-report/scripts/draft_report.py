@@ -26,6 +26,10 @@ CAVEAT = (
     "个别行未填数量的按 1 台/个计；未填单价的部分未计入。均为设备部分估价，不含施工辅材与其他品牌。"
 )
 
+# 售前咨询与配单清单分开登记：没有清单文件、不出估价，只记事项与结论。
+# 周末生成周报时并入「售前咨询」段（与「本周配单项目」并列）。
+PRESALE_NAME = "售前咨询登记.md"
+
 
 def load_notes(manifest_path, label):
     """返回 {文件名: 背景}；登记表不存在时返回空字典。"""
@@ -36,7 +40,32 @@ def load_notes(manifest_path, label):
     return {fname: note for _d, fname, note in week_log.parse_section(text, label)}
 
 
-def main(paths, out_path, date_str, notes):
+def load_presale(root, label):
+    """读取「售前咨询登记.md」本周小节，返回 [(日期, 事项, 内容)]；文件或小节不存在时返回空列表。"""
+    path = os.path.join(root, PRESALE_NAME)
+    if not os.path.exists(path):
+        return []
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    span = week_log.section_span(text, label)
+    if not span:
+        return []
+    rows = []
+    for line in text[span[0]:span[1]].splitlines():
+        line = line.strip()
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if len(cells) < 3:
+            continue
+        if cells[0] in ("咨询日期", "日期") or set(cells[0]) <= set("-: "):
+            continue
+        rows.append((cells[0], cells[1], cells[2]))
+    return rows
+
+
+
+def main(paths, out_path, date_str, notes, presale=None):
     entries = []
     for path in paths:
         base = os.path.basename(path)
@@ -49,9 +78,13 @@ def main(paths, out_path, date_str, notes):
             continue
         file_tp = 0.0
         sheets_meta = []
-        for name, _mr, _mc, grid in sheets:
+        # load_sheets 返回 (name, max_row, max_col, grid, cont)，cont 为合并单元格信息；
+        # 这里按索引取，兼容只有 4 元的旧返回。
+        for sheet in sheets:
+            name, grid = sheet[0], sheet[3]
+            cont = sheet[4] if len(sheet) > 4 else None
             lines = []
-            tp, n_rows, qty_missing, qty_zero = tp_estimate.estimate_sheet(name, grid, lines)
+            tp, n_rows, qty_missing, qty_zero = tp_estimate.estimate_sheet(name, grid, lines, cont)
             if n_rows:
                 sheets_meta.append((name, n_rows, tp, qty_missing, qty_zero))
                 file_tp += tp
@@ -74,13 +107,25 @@ def main(paths, out_path, date_str, notes):
             if zero:
                 extra += f"，数量为0不计{zero}行"
             parts.append(f"{name}（TL行{n_rows}，{tp:,.0f} 元{extra}）")
-        head = f"{idx}. **{e['file']}**：{bg}。"
+        head = f"{idx}. **{e['file']}**：{bg.rstrip('。')}。"
         if e["tp"] > 0:
             md.append(head + f"配单内容：TODO（工作表构成：{'；'.join(parts)}）。"
                              f"TP-LINK 部分估价约 **{e['tp'] / 10000:.1f} 万**（{e['tp']:,.0f} 元）。")
         else:
             md.append(head + "配单内容：TODO（清单中未取到有效的 TP-LINK 数量与单价，未给出估价）。")
         md.append("")
+
+    # 售前咨询与配单并列成段：无清单、无估价，只写事项与结论
+    if presale:
+        md += ["## 售前咨询", ""]
+        for d, item, content in presale:
+            md.append(f"- **{item}**（{d}）")
+            md.append("")
+            for part in (p.strip() for p in content.split("<br>")):
+                if part:
+                    md.append(f"  {part}")
+            md.append("")
+
     # 骨架占位一律不用"请自行补充/删除"这类对话口吻，避免漏改后残留在交付稿里
     md += ["## 其他事项", "", "- （待补，无内容则删除本节）", ""]
 
@@ -115,7 +160,8 @@ if __name__ == "__main__":
                 paths.append(p)
             else:
                 print("  警告：登记表里的文件不在本周清单目录中:", fname, file=sys.stderr)
-    if not paths:
+    presale = load_presale(args.root, label)
+    if not paths and not presale:
         print("没有可处理的清单文件", file=sys.stderr)
         sys.exit(1)
-    main(paths, args.out, date_str, notes)
+    main(paths, args.out, date_str, notes, presale)

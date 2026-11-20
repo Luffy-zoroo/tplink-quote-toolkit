@@ -128,10 +128,15 @@ def print_records(m, rec):
     fuzzy = "  ⚠fuzzy(非精确命中，需人工确认)" if rec.get("match") == "fuzzy" else ""
     print(f"  {m}: {len(rec['records'])} 条  [取数 {rec['fetchedAt']}]{fuzzy}{tag}")
     for r in rec["records"]:
+        seg = ""
+        if r.get("ladderPrice"):
+            seg = f" | 【阶梯 {r.get('startQty')}~{r.get('endQty')} 台:{r.get('price')}】"
         print(f"      price={r.get('price')} | bd={r.get('businessDiscount')} | "
               f"series={r.get('seriesValue')} | lifeCycle={r.get('lifeCycle')} | "
               f"valid={r.get('valid')} | catalog={r.get('catalogPrice')} | "
-              f"ladder={r.get('ladderPrice')} | {r.get('productName')}")
+              f"ladder={r.get('ladderPrice')}{seg} | {r.get('productName')}")
+    if len(rec["records"]) > 1 and any(x.get("ladderPrice") for x in rec["records"]):
+        print(f"      ↳ 阶梯价：按本单实际采购数量落档取价，不要一律取最低价")
 
 
 def cmd_get(models, offline=False, refresh=False, quiet=False):

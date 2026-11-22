@@ -1,19 +1,19 @@
 {
- "at": "2026-11-21",
+ "at": "2026-11-22",
  "paths": [
   {
-   "count": 6,
+   "count": 4,
    "path": "/Luffy-zoroo/tplink-quote-toolkit",
    "title": "Overview",
-   "uniques": 6
+   "uniques": 4
   }
  ],
  "referrers": [],
  "totals": {
-  "clones_count": 107,
-  "clones_uniques": 62,
-  "views_count": 6,
-  "views_uniques": 6,
+  "clones_count": 99,
+  "clones_uniques": 58,
+  "views_count": 4,
+  "views_uniques": 4,
   "window_days": 14
  }
 }

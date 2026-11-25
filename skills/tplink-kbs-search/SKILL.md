@@ -1,6 +1,6 @@
 ---
 name: tplink-kbs-search
-summary: TP-LINK KBS 知识库检索 + 附件下载 + PPT 页导图——HTTP 直连，无需浏览器（站点地址自填）
+summary: TP-LINK KBS 知识库检索 + 附件下载 + PPT 页导图——HTTP 直连，无需浏览器（地址已内置，只需填自己的账号密码）
 description: 当用户要在 TP-LINK KBS 知识库里找方案、找案例、找产品资料、找历史投标材料（"KBS 里查一下""知识库有没有 xx 方案"），或要从方案 PPT 里提取官方拓扑图/界面截图时用本技能。涵盖 ACEGI 登录、全文检索（含「与/或」匹配差异）、附件下载、PPT 指定页导出 PNG、清单 HTML 生成。默认走「与」匹配避免中文拆字噪音，未初始化会话会静默返回空结果，这两点是最容易踩的坑。
 agent_created: true
 ---
@@ -16,27 +16,33 @@ agent_created: true
 
 **不适用**：查产品价格与折扣（走 `tplink-crm-readonly`）、查控标参数（走 `tplink-quote-autofill` / 本地控标库）。
 
-## 前置：配站点和账号
+## 前置：配账号
 
-**站点地址和凭据都不写死在代码里**（本仓库是公开的），必须自己填。按顺序读，先命中先用：
+**站点地址已内置**（`https://kbs.tp-link.com.cn`，代码里 `KBS_BASE_DEFAULT`）——
+站点本身只有内网能访问，地址公开无风险，所以不再要求用户填。
 
-1. 环境变量 `TP_KBS_BASE` / `TP_KBS_USER` / `TP_KBS_PASSWORD`
+**账号密码绝不内置，必须各人用自己的**。按顺序读，先命中先用：
+
+1. 环境变量 `TP_KBS_USER` / `TP_KBS_PASSWORD`（`TP_KBS_BASE` 仍可覆盖地址）
 2. `~/.workbuddy/tplink-toolkit.config.json`：
 
 ```json
 {
   "kbs": {
-    "base": "https://kbs.<你的域名>",
-    "user": "you@example.com",
-    "password": "***"
+    "base": "https://kbs.tp-link.com.cn",
+    "user": "填你自己的账号",
+    "password": "填你自己的密码"
   }
 }
 ```
 
 3. 本技能 `scripts/config.local.json`（同上结构，仅本机用）
 
-> `base` 没配会直接报错并给出填写指引，**不会猜地址**。这和 `crm_base` 的处理方式一致：
-> 配置了却读不到，和根本没配，是两回事。
+> ⚠️ **各人用各人的账号，不要借用别人的**。KBS 的检索记录、下载记录都挂在账号上，
+> 借号会把两个人的操作混在一起，出问题查不清是谁做的。
+
+> 装技能时会问（`install.py` / 数据包的 `生成配置.py`），地址显示默认值直接回车即可。
+> 账号没填时的表现是明确报「未配置 KBS 账号」并给出填写位置，**不会静默失败**。
 
 配好后先验证：`python scripts/kbs.py login` → 输出「登录成功」即通。
 

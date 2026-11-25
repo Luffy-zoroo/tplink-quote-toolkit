@@ -56,6 +56,11 @@ FORBIDDEN = [
     # 检测器本身是公开代码，**把要检的敏感串原样写进来，等于自己泄露一次**。
     (r"工作在" + "南昌办", "内部共享目录名"),
 ]
+# 注意：知识库站点（kbs.tp-link.com.cn）**不在上面的黑名单里，是故意的**。
+# 2026-11-25 作者拍板：该站点只有内网能访问，地址公开无风险，已内置进
+# skills/tplink-kbs-search/scripts/kbs.py 的 KBS_BASE_DEFAULT。
+# 它的**账号密码**仍然绝不入库，那才是要防的东西。
+# 除它之外再出现任何内网域名，都要当泄漏处理。
 SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "node_modules"}
 SKIP_EXT = {".pyc", ".pyo", ".zip", ".xlsx", ".xls", ".png", ".jpg"}
 # 本文件自己就写着这些模式串，跳过，否则每次都自报 1 处
@@ -120,8 +125,9 @@ def check_repo():
         if len(hits) > 12:
             print("    …… 另有 %d 处" % (len(hits) - 12))
     else:
-        ok("无内部域名 / 手机号 / 本机路径 / 内部目录名")
-        print("  OK   无内部域名 / 手机号 / 本机路径 / 内部目录名")
+        ok("无内部 CRM/平台域名 / 手机号 / 本机路径 / 内部目录名")
+        print("  OK   无内部 CRM/平台域名 / 手机号 / 本机路径 / 内部目录名"
+              "（知识库站点地址为故意内置，不计入）")
 
     # 数据文件不能进版本库
     tracked = set()

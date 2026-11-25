@@ -24,6 +24,10 @@ TOOLKIT_DIR = os.path.join(WB, "tplink-toolkit")
 CFG_DST = os.path.join(WB, "tplink-toolkit.config.json")
 CFG_SRC = os.path.join(HERE, "config.example.json")
 
+# 知识库站点地址：已内置。站点只有内网能访问，地址公开无风险；
+# 账号密码绝不内置，必须由使用者填自己的。
+KBS_BASE_DEFAULT = "https://kbs.tp-link.com.cn"
+
 
 def copy_skills(dry):
     src_root = os.path.join(HERE, "skills")
@@ -85,29 +89,34 @@ def _fill_defaults(cfg):
     """补齐老配置里没有的键，避免升级后 kbs 段根本不存在。"""
     cfg.setdefault("crm", {"email": "", "password": ""})
     cfg.setdefault("dealer", {"phone": "", "password": ""})
-    cfg.setdefault("kbs", {"base": "", "user": "", "password": ""})
+    kbs = cfg.get("kbs")
+    if not isinstance(kbs, dict):
+        kbs = {}
+    if not (kbs.get("base") or "").strip():
+        kbs["base"] = KBS_BASE_DEFAULT      # 地址补齐；账号密码一律不预填
+    kbs.setdefault("user", "")
+    kbs.setdefault("password", "")
+    cfg["kbs"] = kbs
     for k in ("crm_base", "dealer_base", "pricing_default", "proxy"):
         cfg.setdefault(k, "")
 
 
 def ask_kbs(cfg):
-    """交互式填写 KBS 知识库账号；返回 True 表示有改动。"""
+    """只问 KBS 的账号密码——地址已内置，不用用户填。"""
     kbs = cfg.get("kbs") or {}
-    cur_base = (kbs.get("base") or "").strip()
+    base = (kbs.get("base") or "").strip() or KBS_BASE_DEFAULT
     cur_user = (kbs.get("user") or "").strip()
     print("\n  ── KBS 知识库检索（可选，不配不影响参数/价格/选型）──")
-    if cur_base:
-        print("     当前已配置：%s（直接回车保留）" % cur_base)
-    else:
-        print("     地址问给你数据包的人要，形如 https://kbs.example.com（末尾不带斜杠）")
-        print("     账号密码就是你自己登录知识库网页那一套")
-    base = _ask("     KBS 地址", cur_base)
-    if not base:
-        print("     未填地址，跳过。以后想用再手动补 kbs 段即可。")
-        return False
+    print("     地址已内置：%s" % base)
+    print("     下面填**你自己的**知识库账号密码（登录知识库网页那一套），")
+    print("     不要借别人的——检索/下载记录都挂在账号上，借号会混在一起。")
+    new_base = _ask("     KBS 地址", base)
     user = _ask("     KBS 账号", cur_user)
     pwd = _ask_pwd("     KBS 密码", kbs.get("password") or "")
-    cfg["kbs"] = {"base": base.rstrip("/"), "user": user, "password": pwd}
+    cfg["kbs"] = {"base": (new_base or base).rstrip("/"),
+                  "user": user.strip(), "password": pwd}
+    if not user.strip():
+        print("     账号为空 → KBS 技能暂时用不了，以后重跑 install.py --ask 补上")
     return True
 
 
@@ -184,7 +193,7 @@ def main():
     else:
         print("接下来：编辑 %s" % CFG_DST)
         print("把里面的路径改成你自己电脑上的真实路径（照 config.example.json 的注释填）。")
-        print("要用 KBS 检索，在配置里补 kbs 段（base / user / password），")
+        print("要用 KBS 检索，只需填 kbs.user / kbs.password（地址已内置），")
         print("或重跑 python install.py --ask 让它问你。")
     print("然后重启 WorkBuddy，在对话里说「把这个清单的参数和价格补一下」即可。")
     print("=" * 62)

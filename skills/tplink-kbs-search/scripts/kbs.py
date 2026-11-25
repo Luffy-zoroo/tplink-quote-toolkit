@@ -62,20 +62,24 @@ def _cfg_kbs():
     return out
 
 
+# 知识库站点地址：已内置（2026-11-25 作者拍板，站点本来就只有内网能访问，
+# 地址公开无风险；账号密码绝不内置，必须各人用自己的）。
+# 仍可用环境变量 TP_KBS_BASE 或配置项 kbs.base 覆盖。
+KBS_BASE_DEFAULT = "https://kbs.tp-link.com.cn"
+
+
 def _resolve_base():
     v = (os.environ.get("TP_KBS_BASE") or "").strip()
     if not v:
         v = str(_cfg_kbs().get("base") or "").strip()
-    return v.rstrip("/")
+    return (v or KBS_BASE_DEFAULT).rstrip("/")
 
 
 BASE = _resolve_base()
 
 _BASE_HINT = (
-    "未配置 KBS 站点地址。本技能不内置内网地址，需要你自己填：\n"
-    "  方式一  环境变量    export TP_KBS_BASE=https://kbs.<你的域名>\n"
-    '  方式二  配置文件    "kbs": {"base": "https://kbs.<你的域名"}   '
-    "（放在 ~/.workbuddy/tplink-toolkit.config.json 或 scripts/config.local.json）"
+    "KBS 站点地址为空。代码里已内置默认地址 %s，\n"
+    "出现此提示说明它被环境变量 TP_KBS_BASE 或配置里的 kbs.base 显式设成了空串，请改掉。" % KBS_BASE_DEFAULT
 )
 
 
@@ -87,10 +91,11 @@ def _load_cred():
     k = _cfg_kbs()
     if k.get("user") and k.get("password"):
         return k["user"], k["password"]
-    sys.exit("未配置 KBS 账号。请设置环境变量 TP_KBS_USER / TP_KBS_PASSWORD，"
-             "或在 ~/.workbuddy/tplink-toolkit.config.json 增加：\n"
-             '  "kbs": {"base": "https://kbs.<你的域名>", '
-             '"user": "you@example.com", "password": "***"}')
+    sys.exit("未配置 KBS 账号。地址已内置（%s），只差你自己的账号密码。\n"
+             "  设环境变量  TP_KBS_USER / TP_KBS_PASSWORD\n"
+             '  或改配置    "kbs": {"user": "你的账号", "password": "你的密码"}\n'
+             "  配置文件位置：~/.workbuddy/tplink-toolkit.config.json\n"
+             "  ⚠ 用你自己的账号，别借别人的——检索/下载记录都会挂在账号上。" % KBS_BASE_DEFAULT)
 
 
 def get(url, referer=None):

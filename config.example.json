@@ -42,9 +42,9 @@
     "password": ""
   },
 
-  "_kbs": "知识库检索的站点与账号（skills/tplink-kbs-search 用）。base 是本仓库唯一不内置的地址之一，必须按你所在组织填写，末尾不带斜杠；base 留空 → 该技能直接报错退出并给出填写指引，不会猜地址。也可以用环境变量 TP_KBS_BASE / TP_KBS_USER / TP_KBS_PASSWORD 代替。不用这个技能就不必填。",
+  "_kbs": "知识库检索（skills/tplink-kbs-search 用）。base 已内置，留空即用默认地址，只有换站点时才需要改；user / password 必须填你自己的（就是登录知识库网页那一套）。⚠ 各人用各人的账号，借号会把检索/下载记录混在一起。也可用环境变量 TP_KBS_BASE / TP_KBS_USER / TP_KBS_PASSWORD 代替。不用这个技能就不必填。",
   "kbs": {
-    "base": "",
+    "base": "https://kbs.tp-link.com.cn",
     "user": "",
     "password": ""
   },

@@ -1,7 +1,7 @@
 # KBS 接口速查（实测 2026-10-23）
 
-平台：蓝凌 Landray KMSS 改造。**站点地址不写死**，由环境变量 `TP_KBS_BASE`
-或配置项 `kbs.base` 指定；下文所有路径都相对于该 base。
+平台：蓝凌 Landray KMSS 改造。**站点地址已内置**（`kbs.py` 的 `KBS_BASE_DEFAULT`），
+仍可用环境变量 `TP_KBS_BASE` 或配置项 `kbs.base` 覆盖；下文所有路径都相对于该 base。
 
 ## 1. 登录
 

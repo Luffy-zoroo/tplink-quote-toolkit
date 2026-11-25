@@ -30,7 +30,8 @@
   pricing_default     未说明定价策略时的默认策略    留空→每次报价仍会问
   crm:    {email, password}   也可用环境变量 TP_CRM_EMAIL / TP_CRM_PASSWORD
   dealer: {phone, password}   也可用环境变量 TP_DEALER_PHONE / TP_DEALER_PASSWORD
-  kbs:    {base, user, password}  base 留空→知识库技能直接报错（不猜地址）
+  kbs:    {base, user, password}  base 已内置默认地址，留空即用默认（换站点才改）
+                              账号密码必须填使用者自己的
                               也可用环境变量 TP_KBS_BASE / TP_KBS_USER / TP_KBS_PASSWORD
 
 每个字段的详细含义、数据文件从哪来、留空的具体表现，
@@ -49,7 +50,10 @@ skills/tplink-quote-autofill/SKILL.md 的「🤖 帮用户配好配置」一节�
 CRM 与合作伙伴平台都是组织内部系统。为了让本仓库可以公开分发，
 代码里**不保留任何真实域名**，一律从 crm_base / dealer_base 读取。
 未配置时相关功能会明确提示"未配置"，而不是静默失败。
-知识库站点（`kbs.base`）同理，见 skills/tplink-kbs-search。
+
+知识库站点（`kbs.base`）是**唯一例外**：该站点只有内网能访问，
+地址公开没有风险，所以内置了默认值（见 skills/tplink-kbs-search 的 KBS_BASE_DEFAULT），
+仍可用配置项或环境变量覆盖。**账号密码一律不内置**，必须各人用自己的。
 
 自查当前生效配置：
     python tpkit_config.py

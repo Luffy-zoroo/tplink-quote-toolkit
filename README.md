@@ -31,6 +31,7 @@
 | 📚 **查知识库** | 在 KBS 知识库里全文检索方案/案例，下载附件，把方案 PPT 指定页导成 PNG 取官方拓扑图 | `skills/tplink-kbs-search` |
 | 📐 **图纸算量** | 从 DWG 矢量直读或 PDF 高 DPI 光栅化，统计交换机/AP/摄像机/门禁与 TO/TD/TP/TV 点位数量 | `skills/cad-pdf-device-tally` |
 | 🚦 **过停产** | 批量查 CRM 的 `lifeCycle`，分「在产 / 停产预警 / 停产」 | `skills/tplink-crm-eol-check` |
+| 📦 **查库存** | 按型号查 CRM 全国分仓库存，**返修仓（HLJ）默认不计入可用量**，可整张清单批量查并标缺口 | `skills/tplink-crm-readonly/scripts/inv_check.py` |
 | 🛡️ **查保修期** | 按型号查官网保修政策（一年保换 / 一年 / 两年 / 三年 / 不保修），可批量填清单的保修期列 | `skills/tplink-warranty-lookup` |
 | 📅 **配单周报** | 登记每天收到的清单，周末自动生成周报草稿 | `skills/tplink-weekly-report` |
 | 🤖 **群里答题** | 把上面的能力接成企业微信售前机器人 | `skills/tplink-presale-bot` |

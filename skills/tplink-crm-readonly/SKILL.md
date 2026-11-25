@@ -1,7 +1,7 @@
 ---
 name: tplink-crm-readonly
 summary: TP-LINK 合作伙伴销售 CRM ($CRM_BASE) 只读查询 + 官网 (www.tp-link.com.cn) 规格参数兜底——API/直连，无需浏览器
-description: 当用户要在 TP-LINK 销售 CRM（$CRM_BASE/crm）里查询产品价格手册/标准价、业务折扣等只读数据，或在控标库查不到时去官网（www.tp-link.com.cn）拉规格参数，用本技能。沙箱无法装浏览器（公网被代理白名单拦截），改用 Python 标准库直连 HTTP。涵盖 CRM 登录/会话/接口、官网搜索/产品页/规格表提取、工程清单批量取数流程。价格**查到即自动落盘本地备份**（price_cache.py），CRM 不可达时可离线查价。
+description: 当用户要在 TP-LINK 销售 CRM（$CRM_BASE/crm）里查询产品价格手册/标准价、业务折扣、**全国分仓库存**等只读数据，或在控标库查不到时去官网（www.tp-link.com.cn）拉规格参数，用本技能。沙箱无法装浏览器（公网被代理白名单拦截），改用 Python 标准库直连 HTTP。涵盖 CRM 登录/会话/接口、官网搜索/产品页/规格表提取、工程清单批量取数流程。价格**查到即自动落盘本地备份**（price_cache.py），CRM 不可达时可离线查价。库存查询见 `inv_check.py`：**HLJ 前缀是返修仓、默认不算可用库存**；「本办仓」按登录账号动态判定，不绑定任何办事处。
 agent_created: true
 ---
 
@@ -9,6 +9,8 @@ agent_created: true
 
 ## 适用场景
 - 查产品价格手册（标准价 / 阶梯价）、业务折扣、折扣产品、价格增量等只读数据。
+- **查库存**（全国分仓 / 本办仓 / 返修仓分开算）：用户问「这个型号还有货吗」「这单够不够发」
+  「整张清单看下缺哪些」时，用 `scripts/inv_check.py`，见下面「📦 库存查询」一节。
 - 沙箱环境无法 `npm install -g agent-browser`（公网被本地代理 127.0.0.1:7897 白名单拦截，仅 TP-LINK 内网域名可达），所以**不要用浏览器自动化**，改用 Python 标准库。
 
 ## 关键事实（已实测 2026-08-27）
@@ -31,6 +33,44 @@ agent_created: true
 - `/api/discountProduct/findAllProductPage` —— 同上全量（缺参会 500，需带参数）。
 - `/api/customer/findPriceListIncrement` —— 客户价格增量。
 - `/api/line/findShortLineByPage` —— 价格手册条目的简版。
+- `/api/inv/findInvQtyTab` —— **全国分仓库存**（2026-11-25 实测）。参数 `productModel` **必填**
+  （不传返回 400「产品型号不能为空」），是**前缀模糊**匹配（`TL-SG` 一次返 3744 行）。
+  返回 `{"list":[...]}`，每行字段：`model, invName(仓号), qty(账面量), boxNumber,
+  orderQty, orderIntransitNum(在途), todayOutQty, lifeCycle, productLabelName, priceInfo(恒 null)`。
+- `/api/inv/findInvPage` —— 仓库字典（`start`/`limit`），但**只返回当前账号所属办事处的仓**，
+  返回体键是 `results`，字段含 `invName / invAlias / officeName / shippingOrg / address`。
+  用它来判「哪些仓是本办仓」；查外地仓中文名要靠它，通常查不到。
+
+## 📦 库存查询（`scripts/inv_check.py`，2026-11-25）
+
+用户问「有货吗 / 够不够 / 这单缺什么」时用这个，**不要**自己拼接口。
+
+```bash
+python scripts/inv_check.py TL-KSG400 TL-AS8230          # 查指定型号
+python scripts/inv_check.py --from 清单.xlsx              # 整张清单批量查，标缺口
+python scripts/inv_check.py --from 清单.xlsx --json -     # 结果转 JSON 给程序/自己读
+python scripts/inv_check.py TL-KSG400 --include-refurb   # 把返修仓也算进可用（一般不要）
+python scripts/inv_check.py --refurb-prefix HLJ,RP ...   # 改返修仓前缀
+python scripts/inv_check.py --selftest                   # 离线自测
+```
+
+### 口径（写死，不许自己改）
+
+1. **`HLJ` 前缀 = 返修仓，返修品不算可发库存。** 用户 2026-11-25 明确。
+   默认不进「可用」，只在「返修」列显示。踩过的坑：`TL-AZJ320` 全国 206 台里 201 台在 HLJ44，
+   按旧口径会当现货报出去 200 台。**类似机械/电子件返修品基本不能交付客户。**
+2. `qty` 是**账面库存**。接口没有可信的「已被订单占用」字段（`orderQty` 大多为 null），
+   所以「可用」= 账面量，**不等于「现在下单一定发得出」**。对客户只能说到这个程度。
+3. **本办仓按登录账号动态取**（`findInvPage`），上海/北京/南昌同一套逻辑，
+   **不许在代码或文档里写死某个办事处的仓号**。取不到时本办列显示 `-`，不猜。
+4. 返回是**全国**口径，不是本办口径。报价说「有现货」前，先看本办列。
+
+### 输出
+
+- 默认是给人看的简表：`型号 / 需 / 可用 / 本办 / 返修 / 在途 / 结论`，下面跟分仓明细。
+  结论只有五种：`查量` / `本办够` / `够(需调拨)` / `仅返修` / `缺 N`。
+- `--json 文件` 写文件，`--json -` 打到 stdout。**格式不锁死**，agent 可自行整理成表/段落。
+- 退出码：`0` 全部满足，`1` 有缺口，`2` 参数或配置问题 —— 批量脚本可直接判。
 
 ## 💾 取价必须「查一次、备份一次」（2026-10-13 用户新规，**推翻「不做本地保留」**）
 

@@ -97,10 +97,20 @@ python 生成配置.py               # 自动把配置里的数据路径指向�
 
 **3）填配置**（内部域名和账号是唯一必须手填的部分）
 
-编辑 `~/.workbuddy/tplink-toolkit.config.json`，填 `crm_base` / `dealer_base` 和账号。
-格式照 `config.example.json` 的注释填。**不填也能用**：参数功能正常，取价会跳过并提示。
+`install.py`（数据包则是 `生成配置.py`）在终端里跑会**当场问你要 KBS 账号**，填完直接写进配置，
+不用手编 JSON。已有配置也照样能补——只补缺的项，你填过的值一个不动：
 
-用到**知识库检索**（`tplink-kbs-search`）时还要多填一项 `kbs.base`：
+```bash
+python install.py           # 终端里默认就问你
+python install.py --ask    # 强制问（脚本里调用时用）
+python install.py --no-input  # 全程不问
+```
+
+除 KBS 外，其余字段编辑 `~/.workbuddy/tplink-toolkit.config.json`，
+填 `crm_base` / `dealer_base` 和账号。格式照 `config.example.json` 的注释填。
+**不填也能用**：参数功能正常，取价会跳过并提示。
+
+KBS 那一段长这样：
 
 ```json
 "kbs": { "base": "https://kbs.<你的域名>", "user": "you@example.com", "password": "***" }

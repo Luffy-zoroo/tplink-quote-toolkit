@@ -1,19 +1,25 @@
 {
- "at": "2026-11-25",
+ "at": "2026-11-26",
  "paths": [
   {
-   "count": 4,
+   "count": 7,
    "path": "/Luffy-zoroo/tplink-quote-toolkit",
    "title": "Overview",
-   "uniques": 4
+   "uniques": 6
+  },
+  {
+   "count": 1,
+   "path": "/Luffy-zoroo/tplink-quote-toolkit/pulls",
+   "title": "/pulls",
+   "uniques": 1
   }
  ],
  "referrers": [],
  "totals": {
-  "clones_count": 94,
-  "clones_uniques": 56,
-  "views_count": 4,
-  "views_uniques": 4,
+  "clones_count": 107,
+  "clones_uniques": 63,
+  "views_count": 8,
+  "views_uniques": 6,
   "window_days": 14
  }
 }
